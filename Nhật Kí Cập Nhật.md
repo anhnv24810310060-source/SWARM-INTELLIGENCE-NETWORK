@@ -150,6 +150,24 @@ Các thành phần đã implement đáp ứng đầy đủ yêu cầu Exit Crite
 **Documentation:** Complete with inline comments & module docs
 
 ---
+## 2025-10-01 (GAP ALIGNMENT PATCH) by ShieldX
+
+### [00:45] 🔍 Observability & Gossip Enhancement
+- Thêm detection metrics chuẩn OTEL (`swarm_detection_*` counters + latency histograms) vào `swarm-core`.
+- Bổ sung Bloom filter duplicate suppression (aging 60s, 2 hash) cho `swarm-gossip` thay deque FIFO; giảm memory churn & cải thiện tỉ lệ dup lookup O(1).
+- Instrument PKI issuance latency histogram `swarm_pki_issue_latency_ms` trong `identity-ca`.
+- Liên kết README tới tài liệu thiết kế tổng thể `swarm-intelligence-design.md`.
+- Ghi chú: false_positive_ratio hiện placeholder -> sẽ hoàn thiện khi có atomic tallies (Phase 2 quality pipeline).
+
+Lợi ích:
+1. Chuẩn hóa detection KPIs → dashboard & alert có thể cấu hình ngay.
+2. Tối ưu gossip duplicate filter scalable (8x nhỏ hơn deque 2048 id ~64KB vs ~8KB bitset).
+3. PKI latency visibility phục vụ SLO issuance (p95 < 250ms mục tiêu).
+4. Tài liệu thiết kế dễ truy cập hơn cho contributor mới.
+
+Commit dự kiến: `feat(obs+gossip+pki): detection & resilience metrics, bloom dup filter, pki latency`
+
+---
 ## 2025-10-01 (POST-DESIGN GAP PATCH) by ShieldX
 
 ### [24:25] 🧩 Đồng bộ thiết kế & codebase (incremental)

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use tracing::{info, warn, debug};
 use swarm_core::{init_tracing, start_health_server, init_metrics};
-use std::{collections::{HashSet, VecDeque}, sync::Arc, time::{Duration, Instant}};
+use std::{collections::{HashSet}, sync::Arc, time::{Duration, Instant}};
 use parking_lot::RwLock;
 use rand::{seq::IteratorRandom, thread_rng};
 use serde::{Serialize, Deserialize};
@@ -21,22 +21,54 @@ struct GossipEnvelope<T> {
 struct GossipHello { node_id: String }
 
 #[derive(Debug)]
+// --- Bloom filter for duplicate suppression (aging) ---
+struct BloomDupFilter {
+    bits: Vec<u8>,
+    mask: usize,
+    last_reset: Instant,
+    reset_after: Duration,
+}
+
+impl BloomDupFilter {
+    fn new(size_pow2: usize, reset_after: Duration) -> Self {
+        let size = size_pow2.next_power_of_two();
+        Self { bits: vec![0; size/8], mask: size - 1, last_reset: Instant::now(), reset_after }
+    }
+    fn maybe_reset(&mut self) {
+        if self.last_reset.elapsed() >= self.reset_after {
+            for b in &mut self.bits { *b = 0; }
+            self.last_reset = Instant::now();
+        }
+    }
+    fn seen_or_insert(&mut self, id: &str) -> bool { // returns true if new (probabilistic)
+        self.maybe_reset();
+        use std::hash::{Hash, Hasher};
+        let mut h1 = std::collections::hash_map::DefaultHasher::new();
+        id.hash(&mut h1);
+        let mut h2 = std::collections::hash_map::DefaultHasher::new();
+        (0x9e3779b97f4a7c15u64).hash(&mut h2);
+        id.as_bytes().iter().rev().for_each(|b| b.hash(&mut h2));
+        let a = (h1.finish() as usize) & self.mask;
+        let b = (h2.finish() as usize) & self.mask;
+        let hit_a = self.set_bit(a);
+        let hit_b = self.set_bit(b);
+        !(hit_a && hit_b)
+    }
+    fn set_bit(&mut self, idx: usize) -> bool {
+        let byte = idx >> 3; let bit = idx & 7; let m = 1u8 << bit; let prev = self.bits[byte] & m != 0; self.bits[byte] |= m; prev
+    }
+}
+
 struct GossipState {
     peers: HashSet<String>,
-    recent: VecDeque<String>, // recent message ids for duplicate suppression
-    max_recent: usize,
+    dup_filter: BloomDupFilter,
     node_id: String,
 }
 
 impl GossipState {
-    fn new(node_id: String, max_recent: usize) -> Self { Self { peers: HashSet::new(), recent: VecDeque::new(), max_recent, node_id } }
+    fn new(node_id: String) -> Self { Self { peers: HashSet::new(), dup_filter: BloomDupFilter::new(1<<17, Duration::from_secs(60)), node_id } }
     fn add_peer(&mut self, p: String) { if p != self.node_id { self.peers.insert(p); } }
-    fn record(&mut self, id: &str) -> bool { // returns true if new
-        if self.recent.contains(&id.to_string()) { return false; }
-        self.recent.push_back(id.to_string());
-        if self.recent.len() > self.max_recent { self.recent.pop_front(); }
-        true
-    }
+    fn record(&mut self, id: &str) -> bool { self.dup_filter.seen_or_insert(id) }
     fn random_fanout(&self, fanout: usize) -> Vec<String> {
         if self.peers.is_empty() { return vec![]; }
         let mut rng = thread_rng();
@@ -128,7 +160,7 @@ async fn main() -> Result<()> {
     let subject_prefix = std::env::var("GOSSIP_SUBJECT_PREFIX").unwrap_or_else(|_| "swarm.gossip".into());
     info!(target: "swarm-gossip", %nats_url, %node_id, %subject_prefix, "Starting swarm-gossip service");
     let nc = async_nats::connect(nats_url).await?;
-    let state = Arc::new(RwLock::new(GossipState::new(node_id.clone(), 2048)));
+    let state = Arc::new(RwLock::new(GossipState::new(node_id.clone())));
     send_hello(&nc, &state, &subject_prefix).await;
     // spawn loops
     tokio::spawn(run_gossip_loop(nc.clone(), state.clone(), subject_prefix.clone()));

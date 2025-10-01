@@ -15,10 +15,51 @@ use opentelemetry_prometheus::PrometheusExporter;
 use prometheus::{Encoder, TextEncoder};
 use std::net::SocketAddr;
 use serde::Deserialize;
+use opentelemetry::metrics::{Counter, Histogram, Meter, Unit};
 static OTEL_INIT: OnceCell<()> = OnceCell::new();
 static CONFIG_CACHE: OnceCell<RwLock<CachedConfig>> = OnceCell::new();
 static PROM_INIT: OnceCell<()> = OnceCell::new();
 static EXPORTER: Lazy<RwLock<Option<PrometheusExporter>>> = Lazy::new(|| RwLock::new(None));
+
+// --- Detection Metrics (Phase 1 observability alignment) ---
+#[derive(Clone, Debug)]
+pub struct DetectionMetrics {
+    pub signature_total: Counter<u64>,
+    pub anomaly_total: Counter<u64>,
+    pub false_positive_total: Counter<u64>,
+    pub alert_latency_ms: Histogram<f64>,
+    pub e2e_latency_ms: Histogram<f64>,
+}
+
+static DETECTION_METER: Lazy<Meter> = Lazy::new(|| opentelemetry::global::meter("swarm_detection"));
+pub static DETECTION_METRICS: Lazy<DetectionMetrics> = Lazy::new(|| {
+    DetectionMetrics {
+        signature_total: DETECTION_METER.u64_counter("swarm_detection_signature_total")
+            .with_description("Total signature-based detection matches")
+            .init(),
+        anomaly_total: DETECTION_METER.u64_counter("swarm_detection_anomaly_total")
+            .with_description("Total anomaly detection events")
+            .init(),
+        false_positive_total: DETECTION_METER.u64_counter("swarm_detection_false_positive_total")
+            .with_description("Confirmed false positives")
+            .init(),
+        alert_latency_ms: DETECTION_METER.f64_histogram("swarm_detection_alert_latency_ms")
+            .with_description("Latency from event ingest to alert emission (ms)")
+            .with_unit(Unit::new("ms"))
+            .init(),
+        e2e_latency_ms: DETECTION_METER.f64_histogram("swarm_ingest_e2e_latency_ms")
+            .with_description("End-to-end ingest->detect->publish latency (ms)")
+            .with_unit(Unit::new("ms"))
+            .init(),
+    }
+});
+
+/// Helper to compute false positive ratio (uses u64 to avoid division by zero).
+pub fn false_positive_ratio() -> f64 {
+    // We can't read counter internal value directly (opaque); left as placeholder.
+    // Real implementation would maintain atomic tallies updated alongside counter increments.
+    0.0
+}
 
 #[derive(Debug, Clone)]
 struct CachedConfig {

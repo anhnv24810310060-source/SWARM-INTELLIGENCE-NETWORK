@@ -1,6 +1,8 @@
 use anyhow::Result;
 use tracing::{info, warn};
 use swarm_core::{init_tracing, start_health_server};
+use opentelemetry::global as otel_global;
+use opentelemetry::metrics::Unit;
 use tonic::{transport::Server, Request, Response, Status};
 use swarm_proto::common::health_server::{Health, HealthServer};
 use swarm_proto::common::HealthCheckResponse;
@@ -47,6 +49,7 @@ impl IdentityCAService {
         csr: &CertificateSigningRequest,
     ) -> Result<Certificate> {
         info!("Issuing certificate for: {}", csr.subject);
+        let start = std::time::Instant::now();
         
         // Generate certificate ID
         let cert_id = format!("cert-{}", uuid::Uuid::new_v4());
@@ -71,6 +74,7 @@ impl IdentityCAService {
         certs.insert(cert_id.clone(), cert.clone());
         
         info!("Certificate issued: {}", cert_id);
+        RECORD_ISSUE_LATENCY.record(start.elapsed().as_secs_f64()*1000.0, &[]);
         Ok(cert)
     }
 
@@ -185,6 +189,7 @@ pub mod pqc {
 async fn main() -> Result<()> {
     init_tracing("identity-ca")?;
     start_health_server(8081).await?;
+    init_metrics_once();
     
     info!(target: "identity-ca", "Starting identity-ca service");
     
@@ -210,6 +215,18 @@ async fn main() -> Result<()> {
     
     Ok(())
 }
+
+use once_cell::sync::Lazy;
+use opentelemetry::metrics::Histogram;
+static RECORD_ISSUE_LATENCY: Lazy<Histogram<f64>> = Lazy::new(|| {
+    let meter = otel_global::meter("identity-ca");
+    meter.f64_histogram("swarm_pki_issue_latency_ms")
+        .with_description("Certificate issuance latency (ms)")
+        .with_unit(Unit::new("ms"))
+        .init()
+});
+
+fn init_metrics_once() { Lazy::force(&RECORD_ISSUE_LATENCY); }
 
 fn init_tracing() -> Result<()> {
     tracing_subscriber::fmt()
