@@ -150,6 +150,40 @@ Các thành phần đã implement đáp ứng đầy đủ yêu cầu Exit Crite
 **Documentation:** Complete with inline comments & module docs
 
 ---
+## 2025-10-01 (ARCHITECTURE GAP SYNC SKELETON) by ShieldX
+
+### [Update] Core Swarm Intelligence Skeleton Modules Added
+Tóm tắt bổ sung để đồng bộ codebase với thiết kế 1.1:
+
+1. Core Modules (Rust `swarm-core`)
+  - `gossip.rs`: fanout TTL gossip skeleton (ENV: GOSSIP_FANOUT, GOSSIP_TTL_HOPS), duplicate suppression (HashSet placeholder), metrics-ready design.
+  - `transport_quic.rs`: QUIC abstraction scaffold (future `quinn` integration) with ALPN + idle timeout config.
+  - `lifecycle.rs`: Bootstrap FSM (HardwareInit → NetworkDiscovery → KnowledgeSync → Operational) + readiness hook.
+  - `reputation.rs`: In-memory reputation scoring (reward/penalty, exponential decay via half-life) for future weighted consensus.
+  - `metrics_ext.rs`: Extended metrics groups (consensus, federated learning, autoscale, resilience advanced) exported.
+
+2. Observability & Health
+  - Health server: thêm `/live`, `/ready`, `/status` (phản hồi config_version) thay `/healthz` đơn giản.
+  - Detection metrics giữ nguyên; mở rộng export metrics nhóm mới.
+
+3. Config Hardening
+  - `DynamicConfig`: thêm `config_version`, `config_signature` (chuẩn bị signed rollout).
+
+4. Documentation
+  - Cập nhật `swarm-intelligence-design.md` Version -> 1.1, Last Updated -> 2025-10-01.
+
+5. Readiness Hooks
+  - API: `mark_ready`, `clear_ready`, `mark_not_live` phục vụ deployment probes.
+
+6. Reputation Integration Prep
+  - Re-export service & config qua `lib.rs` để các service tiêu thụ dễ dàng.
+
+Deferred (Phase kế tiếp): Bloom filter gossip, QUIC real transport, breaker metrics wiring, secure config signature validation.
+
+Lợi ích chính: Thiết lập nền tảng mở rộng không phá vỡ tương thích, đảm bảo đường nâng cấp tuần tự cho consensus weighting, QUIC streaming và adaptive gossip.
+
+Commit dự kiến: `feat(core): gossip+quic+lifecycle+reputation+ext-metrics skeleton & health endpoints`
+
 ## 2025-10-01 (GAP ALIGNMENT PATCH) by ShieldX
 
 ### [00:45] 🔍 Observability & Gossip Enhancement
@@ -305,3 +339,61 @@ Next (đề xuất):
 Tác động: đặt nền tảng cho dissemination event (alert, consensus height, model update) với kiểm soát chi phí lan truyền & chống bùng nổ duplicate.
 
 Commit: `feat(gossip): baseline fanout+dup suppression+metrics+membership`.
+
+---
+## 2025-10-01 (SWARM INTELLIGENCE CORE MODULES) by ShieldX
+
+### [01:30] 🧠 Bổ sung các mô-đun trí tuệ bầy đàn cốt lõi trong `swarm-core`
+**Mục tiêu:** Lấp đầy khoảng trống giữa codebase và tài liệu thiết kế `swarm-intelligence-design.md` (phần ML Detection, Federated Learning, Consensus, Auto-Scaling).
+
+#### Thành phần mới
+1. `ml_detection.rs`
+  - Pipeline 3 tầng: Signature → Anomaly → ML Classification
+  - Heuristic inference placeholder (chuẩn bị tích hợp ONNX/TVM)
+  - OTEL metrics: signature_total, anomaly_total, alert_latency_ms, e2e_latency_ms
+2. `federated_learning.rs`
+  - Coordinator hỗ trợ FedAvg / FedProx / FedNova (simplified)
+  - Weighted gradient aggregation (sample_count based)
+  - Round versioning & timestamping
+3. `consensus.rs`
+  - PBFT tối giản (Proposal → Prepare → Commit → Execute)
+  - 2f+1 quorum rule; state machine reset vòng mới
+  - Chuẩn bị mở rộng view-change & batching
+4. `autoscaling.rs`
+  - Heuristic scale-out/in dựa CPU & Memory + cooldown 5 phút
+  - Proportional scale-out (1/2/3 nodes tùy mức tải)
+  - 30 phút sliding window giữ lịch sử
+
+#### Cập nhật khác
+- Export public API trong `lib.rs` (re-export types & constructors)
+- Đồng bộ metrics detection histograms & counters vào registry Prometheus
+- Thêm các test đơn vị cơ bản mỗi module để bảo đảm hành vi nền tảng
+
+#### Lợi ích
+| Khả năng | Trước | Sau |
+|----------|-------|-----|
+| Phát hiện nhiều tầng | Chưa | Có (3-stage) |
+| Học liên kết | Chưa | FedAvg / Prox / Nova (stub) |
+| Đồng thuận BFT | Chưa | PBFT state machine tối giản |
+| Tự mở rộng | Chưa | Heuristic + cooldown |
+| Quan sát hoá detection | Một phần | Đầy đủ counters + histograms |
+
+#### Kỹ thuật còn lại (deferred)
+- Secure aggregation (masking / homomorphic) cho FL
+- View change + leader election cho PBFT
+- Threat-adaptive scaling (threat_volume weighting)
+- True model inference backend (ONNX/TensorRT) & quantization pipeline
+- False positive ratio internal counter (hiện placeholder)
+
+#### Rủi ro & Giảm thiểu
+| Rủi ro | Ảnh hưởng | Giảm thiểu |
+|--------|-----------|-----------|
+| ML heuristic giả lập | Độ chính xác | Tách abstraction dễ thay thế inference engine |
+| PBFT thiếu view-change | Liveness khi leader lỗi | Kế hoạch bổ sung phase sau với timeout detector |
+| Scaling đơn nhân tố | Sử dụng tài nguyên chưa tối ưu | Bổ sung threat & latency signals Phase 2 |
+
+Commit dự kiến: `feat(core): ml detection + federated learning + pbft consensus + autoscaling`
+
+**Implementer:** ShieldX Core Team
+**Status:** Ready for integration tests
+---

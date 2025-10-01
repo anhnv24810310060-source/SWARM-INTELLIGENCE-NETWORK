@@ -16,6 +16,7 @@ use prometheus::{Encoder, TextEncoder};
 use std::net::SocketAddr;
 use serde::Deserialize;
 use opentelemetry::metrics::{Counter, Histogram, Meter, Unit};
+use std::sync::atomic::{AtomicBool, Ordering};
 static OTEL_INIT: OnceCell<()> = OnceCell::new();
 static CONFIG_CACHE: OnceCell<RwLock<CachedConfig>> = OnceCell::new();
 static PROM_INIT: OnceCell<()> = OnceCell::new();
@@ -32,6 +33,11 @@ pub struct DetectionMetrics {
 }
 
 static DETECTION_METER: Lazy<Meter> = Lazy::new(|| opentelemetry::global::meter("swarm_detection"));
+static NODE_LIVENESS: AtomicBool = AtomicBool::new(true);
+static NODE_READINESS: AtomicBool = AtomicBool::new(false);
+pub fn mark_ready() { NODE_READINESS.store(true, Ordering::SeqCst); }
+pub fn clear_ready() { NODE_READINESS.store(false, Ordering::SeqCst); }
+pub fn mark_not_live() { NODE_LIVENESS.store(false, Ordering::SeqCst); }
 pub static DETECTION_METRICS: Lazy<DetectionMetrics> = Lazy::new(|| {
     DetectionMetrics {
         signature_total: DETECTION_METER.u64_counter("swarm_detection_signature_total")
@@ -120,7 +126,15 @@ pub fn init_metrics() -> Result<()> {
 
 pub async fn start_health_server(port: u16) -> Result<()> {
     let app = Router::new()
-        .route("/healthz", get(|| async { "ok" }))
+        .route("/live", get(|| async { axum::Json(serde_json::json!({"live": NODE_LIVENESS.load(Ordering::SeqCst)})) }))
+        .route("/ready", get(|| async { axum::Json(serde_json::json!({"ready": NODE_READINESS.load(Ordering::SeqCst)})) }))
+        .route("/status", get(|| async {
+            axum::Json(serde_json::json!({
+                "live": NODE_LIVENESS.load(Ordering::SeqCst),
+                "ready": NODE_READINESS.load(Ordering::SeqCst),
+                "config_version": CONFIG_CACHE.get().and_then(|c| c.read().cfg.config_version.clone()),
+            }))
+        }))
         .route("/metrics", get(metrics_handler));
     let addr = SocketAddr::from(([0,0,0,0], port));
     tracing::info!(?addr, "Health server listening");
@@ -137,10 +151,13 @@ pub struct DynamicConfig {
     pub service_name: Option<String>,
     pub nats_url: Option<String>,
     pub log_level: Option<String>,
+    // --- Added for versioned & signed config roadmap alignment ---
+    pub config_version: Option<String>,
+    pub config_signature: Option<String>, // placeholder (e.g., hex-encoded ed25519 or PQC signature)
 }
 
 impl Default for DynamicConfig {
-    fn default() -> Self { Self { service_name: None, nats_url: Some("127.0.0.1:4222".into()), log_level: Some("info".into()) } }
+    fn default() -> Self { Self { service_name: None, nats_url: Some("127.0.0.1:4222".into()), log_level: Some("info".into()), config_version: Some("0".into()), config_signature: None } }
 }
 
 pub async fn load_config(service: &str) -> Result<DynamicConfig> {
@@ -226,3 +243,24 @@ mod resilience; // new module providing retry & circuit breaker
 pub use resilience::{retry_async, RetryConfig, CircuitBreaker, BreakerState};
 pub mod resilience_telemetry; // telemetry metrics for resilience primitives
 pub use resilience_telemetry::{register_metrics as register_resilience_metrics, ResilienceMetrics};
+
+// Advanced swarm intelligence modules
+pub mod ml_detection;
+pub mod federated_learning;
+pub mod consensus;
+pub mod autoscaling;
+pub mod gossip;
+pub mod transport_quic;
+pub mod lifecycle;
+pub mod reputation;
+mod metrics_ext; // extended metrics groups
+
+pub use ml_detection::{MLDetectionPipeline, ThreatEvent, DetectionResult, ThreatLevel};
+pub use federated_learning::{FederatedLearningCoordinator, ModelGradient, GlobalModel, AggregationMethod};
+pub use consensus::{PBFTConsensus, ConsensusMessage, NodeId};
+pub use autoscaling::{AutoScaler, ResourceMetrics, ScalingDecision, ScalingThresholds};
+pub use gossip::{GossipEngine, GossipMessage, GossipKind, GossipId};
+pub use transport_quic::{QuicTransport, QuicConfig, QuicConnectionHandle};
+pub use lifecycle::{BootstrapState, BootstrapPhase};
+pub use reputation::{ReputationService, ReputationConfig};
+pub use metrics_ext::{EXTENDED_METRICS, ExtendedMetrics};
