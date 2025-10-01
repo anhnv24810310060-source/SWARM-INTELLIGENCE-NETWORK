@@ -1,0 +1,244 @@
+# Enhanced Alert Rules for SwarmGuard Intelligence Network
+groups:
+  - name: swarm_critical_alerts
+    interval: 10s
+    rules:
+      # Detection Quality Alerts
+      - alert: HighFalsePositiveRate
+        expr: (swarm_detection_false_positives_total / (swarm_detection_true_positives_total + swarm_detection_false_positives_total)) > 0.02
+        for: 5m
+        labels:
+          severity: critical
+          category: detection_quality
+        annotations:
+          summary: "False positive rate exceeded threshold"
+          description: "False positive rate is {{ $value | humanizePercentage }}. Threshold: 2%"
+          runbook_url: "https://docs.swarmguard.io/runbooks/high-fp-rate"
+
+      - alert: LowDetectionRate
+        expr: (swarm_detection_true_positives_total / (swarm_detection_true_positives_total + swarm_detection_false_negatives_total)) < 0.98
+        for: 10m
+        labels:
+          severity: critical
+          category: detection_quality
+        annotations:
+          summary: "Detection rate dropped below threshold"
+          description: "Detection rate is {{ $value | humanizePercentage }}. Threshold: 98%"
+          runbook_url: "https://docs.swarmguard.io/runbooks/low-detection-rate"
+
+      # Performance Alerts
+      - alert: HighIngestionLatency
+        expr: histogram_quantile(0.95, rate(swarm_ingest_e2e_latency_ms_bucket[5m])) > 150
+        for: 3m
+        labels:
+          severity: warning
+          category: performance
+        annotations:
+          summary: "P95 ingestion latency exceeded"
+          description: "P95 latency is {{ $value }}ms. Threshold: 150ms"
+
+      - alert: ConsensusRoundSlow
+        expr: histogram_quantile(0.95, rate(consensus_round_duration_ms_bucket[5m])) > 300
+        for: 5m
+        labels:
+          severity: warning
+          category: consensus
+        annotations:
+          summary: "Consensus rounds are slow"
+          description: "P95 consensus round time is {{ $value }}ms. Threshold: 300ms"
+
+      # System Health Alerts
+      - alert: NodeDown
+        expr: up{job="node-runtime"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: availability
+        annotations:
+          summary: "Node {{ $labels.instance }} is down"
+          description: "Node has been down for more than 1 minute"
+
+      - alert: HighMemoryUsage
+        expr: (node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes > 0.90
+        for: 5m
+        labels:
+          severity: warning
+          category: resources
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage is {{ $value | humanizePercentage }}"
+
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 10m
+        labels:
+          severity: warning
+          category: resources
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage is {{ $value }}%"
+
+      # Consensus Alerts
+      - alert: ConsensusViewChanges
+        expr: rate(consensus_view_changes_total[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          category: consensus
+        annotations:
+          summary: "Frequent consensus view changes"
+          description: "View change rate: {{ $value }} per second"
+
+      - alert: ConsensusSplit
+        expr: count(consensus_current_view) by (view) > 1
+        for: 2m
+        labels:
+          severity: critical
+          category: consensus
+        annotations:
+          summary: "Consensus cluster split detected"
+          description: "Multiple views detected: potential network partition"
+
+      # Security Alerts
+      - alert: CriticalThreatsSurge
+        expr: rate(swarm_detection_critical_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: critical
+          category: security
+        annotations:
+          summary: "Surge in critical threats"
+          description: "Critical threat rate: {{ $value }} per second"
+          runbook_url: "https://docs.swarmguard.io/runbooks/critical-severity-surge"
+
+      - alert: AnomalyDetectionSpike
+        expr: rate(swarm_detection_anomaly_total[5m]) > 50
+        for: 5m
+        labels:
+          severity: warning
+          category: security
+        annotations:
+          summary: "Anomaly detection spike"
+          description: "Anomaly rate: {{ $value }} per second"
+
+      # Federated Learning Alerts
+      - alert: FederatedLearningRoundStalled
+        expr: time() - federated_learning_last_round_timestamp > 900
+        for: 5m
+        labels:
+          severity: warning
+          category: ml
+        annotations:
+          summary: "Federated learning round stalled"
+          description: "No FL round completed in last 15 minutes"
+
+      - alert: LowFLParticipation
+        expr: federated_learning_participants < 10
+        for: 10m
+        labels:
+          severity: warning
+          category: ml
+        annotations:
+          summary: "Low FL participation"
+          description: "Only {{ $value }} participants in current round"
+
+      # Network Alerts
+      - alert: HighPacketLoss
+        expr: rate(node_network_receive_drop_total[5m]) > 100
+        for: 5m
+        labels:
+          severity: warning
+          category: network
+        annotations:
+          summary: "High packet loss on {{ $labels.instance }}"
+          description: "Packet drop rate: {{ $value }} per second"
+
+      - alert: NATSConnectionLoss
+        expr: absent(up{job="nats"}) or up{job="nats"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: infrastructure
+        annotations:
+          summary: "NATS connection lost"
+          description: "Cannot connect to NATS message broker"
+
+      # Data Quality Alerts
+      - alert: IngestionDegradedMode
+        expr: rate(swarm_ingest_degraded_mode_total[5m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          category: data_quality
+        annotations:
+          summary: "Ingestion in degraded mode"
+          description: "Ingestion has entered degraded mode due to broker unavailability"
+
+      - alert: HighIngestionErrors
+        expr: rate(swarm_ingest_errors_total[5m]) / rate(swarm_ingest_events_total[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          category: data_quality
+        annotations:
+          summary: "High ingestion error rate"
+          description: "Error rate: {{ $value | humanizePercentage }}"
+
+  - name: swarm_slo_alerts
+    interval: 30s
+    rules:
+      # SLO: 99.9% availability
+      - alert: SLOAvailabilityBreach
+        expr: (sum(up{job=~".*swarm.*"}) / count(up{job=~".*swarm.*"})) < 0.999
+        for: 5m
+        labels:
+          severity: critical
+          category: slo
+        annotations:
+          summary: "SLO availability breach"
+          description: "Availability: {{ $value | humanizePercentage }}. SLO: 99.9%"
+
+      # SLO: P95 latency < 100ms
+      - alert: SLOLatencyBreach
+        expr: histogram_quantile(0.95, rate(swarm_ingest_e2e_latency_ms_bucket[10m])) > 100
+        for: 10m
+        labels:
+          severity: warning
+          category: slo
+        annotations:
+          summary: "SLO latency breach"
+          description: "P95 latency: {{ $value }}ms. SLO: 100ms"
+
+      # SLO: Error rate < 0.1%
+      - alert: SLOErrorRateBreach
+        expr: (sum(rate(swarm_ingest_errors_total[10m])) / sum(rate(swarm_ingest_events_total[10m]))) > 0.001
+        for: 10m
+        labels:
+          severity: warning
+          category: slo
+        annotations:
+          summary: "SLO error rate breach"
+          description: "Error rate: {{ $value | humanizePercentage }}. SLO: 0.1%"
+
+  - name: swarm_capacity_alerts
+    interval: 60s
+    rules:
+      - alert: DiskSpaceRunningOut
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.10
+        for: 10m
+        labels:
+          severity: warning
+          category: capacity
+        annotations:
+          summary: "Disk space running out on {{ $labels.instance }}"
+          description: "Available disk space: {{ $value | humanizePercentage }}"
+
+      - alert: InodeUsageHigh
+        expr: (node_filesystem_files_free / node_filesystem_files) < 0.10
+        for: 10m
+        labels:
+          severity: warning
+          category: capacity
+        annotations:
+          summary: "Inode usage high on {{ $labels.instance }}"
+          description: "Free inodes: {{ $value | humanizePercentage }}"
