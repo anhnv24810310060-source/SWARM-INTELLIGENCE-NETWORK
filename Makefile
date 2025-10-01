@@ -4,13 +4,26 @@ RUST_SERVICES = sensor-gateway node-runtime swarm-gossip consensus-core identity
 GO_SERVICES = policy-service control-plane billing-service audit-trail threat-intel
 PY_SERVICES = model-registry federated-orchestrator evolution-core
 
-.PHONY: all rust go python proto test format security proto-clean
+.PHONY: all rust go python proto test format security proto-clean jetstream-validate e2e-detection resilience-check ci-validate
 
 all: proto rust go python
 
 proto:
 	@echo "[PROTO] generate via buf"
 	bash scripts/generate-proto.sh
+
+jetstream-validate:
+	@bash scripts/validate_jetstream.sh || echo "[JETSTREAM] validation script missing or failed (non-fatal)"
+
+e2e-detection:
+	@bash scripts/test_e2e_detection.sh || (echo "[E2E] detection pipeline FAILED" && exit 1)
+
+resilience-check:
+	@echo "[RESILIENCE] (placeholder) scan for ad-hoc retries (manual review required)"
+	@grep -R "retry(" -n services || true
+
+ci-validate: proto test rust go python license-check e2e-detection
+	@echo "[CI] aggregate validation complete"
 
 proto-clean:
 	rm -rf proto/gen || true

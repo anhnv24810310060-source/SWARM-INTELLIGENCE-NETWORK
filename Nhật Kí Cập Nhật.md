@@ -150,6 +150,20 @@ Các thành phần đã implement đáp ứng đầy đủ yêu cầu Exit Crite
 **Documentation:** Complete with inline comments & module docs
 
 ---
+## 2025-10-01 (POST-DESIGN GAP PATCH) by ShieldX
+
+### [24:25] 🧩 Đồng bộ thiết kế & codebase (incremental)
+- Cập nhật `docs/performance-optimization.md`: đánh dấu hoàn thành regex caching + NATS pooling (Phase 1).
+- Thêm telemetry resilience (`libs/rust/core/src/resilience_telemetry.rs`): counter & histogram cho retry/circuit breaker (theo thiết kế 5.3 Resilience).
+- Script smoke test E2E detection `scripts/test_e2e_detection.sh` (ingest → alert) + target `e2e-detection` trong Makefile.
+- Bổ sung Makefile targets: `jetstream-validate`, `resilience-check`, `ci-validate` (gom bước build/test).
+- Ghi chú deferred: Bloom filter gossip, adaptive fanout, hash LRU cache, batching window.
+
+Lợi ích: Chuẩn hoá observability resilience, đảm bảo pipeline detection tối thiểu hoạt động, chuẩn bị nền tảng cho Phase 2 tối ưu hiệu năng & gossip nâng cao.
+
+Commit: feat(core+build): resilience telemetry + e2e detection smoke + perf checklist sync
+
+---
 ## 2025-10-01 (E2E LATENCY OPTIMIZATION)
 
 ### [22:00] 🚀 Hoàn thiện performance profiling & connection pooling infrastructure

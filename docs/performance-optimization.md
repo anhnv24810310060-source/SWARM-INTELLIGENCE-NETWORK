@@ -44,13 +44,14 @@ cargo bench --bench e2e_latency
 
 ### Phase 1: Quick Wins (Current)
 - [x] Add profiling infrastructure (pprof + flamegraph)
-- [ ] Lazy regex compilation caching
-- [ ] NATS connection pooling
+- [x] Lazy regex compilation caching (implemented using once_cell)
+- [x] NATS connection pooling (NatsPool with round-robin selection)
+   - NOTE: batching + adaptive window deferred to Phase 2
 
 ### Phase 2: Advanced (Week 2)
-- [ ] Payload hash LRU cache
-- [ ] Message batching with adaptive window
-- [ ] Zero-copy deserialization (flatbuffers experiment)
+- [ ] Payload hash LRU cache (design sec. Hotspot 3)
+- [ ] Message batching with adaptive window (build on pooling infra)
+- [ ] Zero-copy deserialization (flatbuffers / simd-json experiment)
 
 ### Phase 3: System-Level (Week 3-4)
 - [ ] CPU pinning for detection threads

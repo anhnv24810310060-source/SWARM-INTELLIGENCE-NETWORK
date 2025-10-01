@@ -183,3 +183,5 @@ async fn metrics_handler() -> axum::response::Response {
 
 mod resilience; // new module providing retry & circuit breaker
 pub use resilience::{retry_async, RetryConfig, CircuitBreaker, BreakerState};
+pub mod resilience_telemetry; // telemetry metrics for resilience primitives
+pub use resilience_telemetry::{register_metrics as register_resilience_metrics, ResilienceMetrics};
