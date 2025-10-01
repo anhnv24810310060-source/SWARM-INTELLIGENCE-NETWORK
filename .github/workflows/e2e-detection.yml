@@ -1,0 +1,40 @@
+name: e2e-detection
+on:
+  pull_request:
+    paths:
+      - 'services/sensor-gateway/**'
+      - 'configs/detection-rules.yaml'
+      - 'tests/e2e/detection_alert_flow.sh'
+  workflow_dispatch: {}
+  schedule:
+    - cron: '15 2 * * *'
+
+jobs:
+  detection-alert-flow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Install NATS CLI & server
+        run: |
+          curl -Ls https://github.com/nats-io/natscli/releases/latest/download/nats-$(uname | tr '[:upper:]' '[:lower:]')-amd64.tar.gz | tar -xz --strip-components=1 -C /usr/local/bin nats
+          curl -Ls https://github.com/nats-io/nats-server/releases/latest/download/nats-server-$(uname | tr '[:upper:]' '[:lower:]')-amd64.zip -o nats-server.zip
+          unzip -q nats-server.zip -d /usr/local/bin
+          chmod +x /usr/local/bin/nats-server
+      - name: Build sensor-gateway
+        run: cargo build -p sensor-gateway
+      - name: Run detection alert flow test
+        run: |
+          chmod +x tests/e2e/detection_alert_flow.sh
+          tests/e2e/detection_alert_flow.sh

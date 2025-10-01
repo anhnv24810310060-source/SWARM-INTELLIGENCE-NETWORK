@@ -1,9 +1,13 @@
-package audittrail
 package main
 
-import "log"
+import (
+	"log/slog"
+
+	sloglog "github.com/swarmguard/libs/go/core/logging"
+)
 
 func main() {
-	log.Println("Starting audit-trail")
+	sloglog.Init("audit-trail")
+	slog.Info("starting service")
 	// TODO: Append-only log & Merkle root chain
 }

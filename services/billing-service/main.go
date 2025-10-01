@@ -1,8 +1,13 @@
 package main
 
-import "log"
+import (
+	"log/slog"
+
+	sloglog "github.com/swarmguard/libs/go/core/logging"
+)
 
 func main() {
-	log.Println("Starting billing-service")
+	sloglog.Init("billing-service")
+	slog.Info("starting service")
 	// TODO: Usage aggregation + pricing engine
 }

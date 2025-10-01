@@ -4,6 +4,22 @@ use thiserror::Error;
 use parking_lot::Mutex;
 use futures::Future;
 use tracing::{warn, debug};
+use opentelemetry::{global, metrics::Counter};
+use once_cell::sync::Lazy;
+
+static RETRY_ATTEMPTS: Lazy<Counter<u64>> = Lazy::new(|| {
+    global::meter("swarm-resilience")
+        .u64_counter("swarm_resilience_retry_attempts_total")
+        .with_description("Total retry attempts executed")
+        .init()
+});
+
+static CIRCUIT_OPEN: Lazy<Counter<u64>> = Lazy::new(|| {
+    global::meter("swarm-resilience")
+        .u64_counter("swarm_resilience_circuit_open_total")
+        .with_description("Number of times circuit transitioned to open")
+        .init()
+});
 
 #[derive(Debug, Error)]
 pub enum ResilienceError { #[error("circuit open")] CircuitOpen }
@@ -12,6 +28,7 @@ pub async fn retry_async<F, Fut, T, E>(mut f: F, attempts: usize, delay: Duratio
 where F: FnMut() -> Fut, Fut: Future<Output = Result<T, E>> {
     let mut last_err = None;
     for i in 0..attempts {
+        RETRY_ATTEMPTS.add(1, &[]);
         match f().await { Ok(v) => return Ok(v), Err(e) => { last_err = Some(e); if i+1 < attempts { tokio::time::sleep(delay).await; } } }
     }
     Err(last_err.unwrap())
@@ -33,7 +50,7 @@ impl CircuitBreaker {
         true
     }
     pub fn record_success(&self) { let mut st = self.state.lock(); st.failures=0; }
-    pub fn record_failure(&self) { let mut st = self.state.lock(); st.failures+=1; if st.failures >= self.failure_threshold { if st.opened_at.is_none() { st.opened_at = Some(Instant::now()); warn!("circuit opened"); } } }
+    pub fn record_failure(&self) { let mut st = self.state.lock(); st.failures+=1; if st.failures >= self.failure_threshold { if st.opened_at.is_none() { st.opened_at = Some(Instant::now()); CIRCUIT_OPEN.add(1, &[]); warn!("circuit opened"); } } }
 }
 
 #[cfg(test)]

@@ -1,0 +1,62 @@
+# Canonical JetStream stream specification (kept in VCS for drift detection)
+# Fields purpose:
+# - name: Stream name
+# - subjects: List of subject wildcards bound to stream
+# - retention: (limits|interest|workqueue)
+# - max_age: Age retention (e.g. 168h = 7d)
+# - storage: (file|memory)
+# - replicas: Replication factor (cluster)
+# - discard: (old|new) behaviour when limits hit
+# - dupe_window: Duplicate tracking window
+# - description: Human context
+streams:
+  - name: INGEST_RAW_V1
+    subjects: ["ingest.v1.raw"]
+    retention: limits
+    max_age: 168h
+    storage: file
+    replicas: 3
+    discard: old
+    dupe_window: 2m
+    description: Durable storage of raw ingested events for reprocessing / ML backfill
+    consumers:
+      - name: ANALYTICS_BATCH
+        mode: pull
+        deliver_policy: all
+        ack_policy: explicit
+        max_ack_pending: 512
+      - name: REALTIME_PIPE
+        mode: push
+        deliver_policy: last
+        ack_policy: explicit
+        max_ack_pending: 256
+  - name: INGEST_STATUS_V1
+    subjects: ["ingest.v1.status"]
+    retention: limits
+    max_age: 24h
+    storage: memory
+    replicas: 1
+    discard: old
+    dupe_window: 2m
+    description: Ephemeral ingestion status / heartbeat events
+    consumers:
+      - name: STATUS_MONITOR
+        mode: pull
+        deliver_policy: last
+        ack_policy: none
+        max_ack_pending: 128
+  - name: CONSENSUS_EVENTS_V1
+    subjects: ["consensus.v1.*"]
+    retention: limits
+    max_age: 720h
+    storage: file
+    replicas: 3
+    discard: old
+    dupe_window: 2m
+    description: Replayable consensus decisions + audit trail
+    consumers:
+      - name: CONSENSUS_AUDIT_TAIL
+        mode: pull
+        deliver_policy: all
+        ack_policy: explicit
+        max_ack_pending: 256

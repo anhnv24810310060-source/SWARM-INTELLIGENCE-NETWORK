@@ -16,6 +16,12 @@ Guidelines:
 Current Implemented Metrics:
 - `swarm_ingest_events_total`: Count of RawEvent successfully processed.
 - `swarm_ingest_errors_total`: Count of ingestion pipeline errors.
+- `swarm_ingest_degraded_mode_total`: Times ingestion entered degraded mode (broker unavailable at startup or transient reconnect failure window).
+- `swarm_ingest_encode_latency_ms`: Histogram of protobuf encode time per RawEvent (milliseconds) – helps track serialization hotspots.
+- `swarm_ingest_payload_bytes`: Histogram of payload size distribution – capacity planning & anomaly detection (sudden spike in size).
+ - `swarm_ingest_degraded_mode_total`: Times ingestion entered degraded mode due to missing broker.
+ - `swarm_resilience_retry_attempts_total`: Total retry attempts executed (shared resilience library).
+ - `swarm_resilience_circuit_open_total`: Number of times a circuit transitions to open state.
 
 Future Reserved Names:
 - `svc_consensus_round_total` (counter of rounds)

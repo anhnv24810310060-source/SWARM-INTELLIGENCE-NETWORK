@@ -38,8 +38,23 @@ pub fn init_tracing(service: &str) -> Result<()> {
                 KeyValue::new("service.name", service.to_string()),
             ])))
             .install_batch(opentelemetry::runtime::Tokio)?;
-
-        let fmt_layer = tracing_subscriber::fmt::layer();
+        let json = std::env::var("SWARM_JSON_LOG").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
+        let fmt_layer = if json {
+            tracing_subscriber::fmt::layer()
+                .json()
+                .flatten_event(true)
+                .with_current_span(true)
+                .with_span_list(false)
+                .event_format(tracing_subscriber::fmt::format()
+                    .json()
+                    .with_current_span(true)
+                    .with_span_list(false))
+        } else {
+            tracing_subscriber::fmt::layer()
+                .with_target(true)
+                .with_thread_ids(false)
+                .with_line_number(true)
+        };
         let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
         let env_filter = tracing_subscriber::EnvFilter::from_default_env();
         let registry = tracing_subscriber::registry().with(env_filter).with(fmt_layer).with(otel_layer);

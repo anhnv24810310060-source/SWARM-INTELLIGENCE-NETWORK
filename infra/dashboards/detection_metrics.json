@@ -1,0 +1,67 @@
+{
+  "title": "Detection Pipeline Metrics",
+  "schemaVersion": 39,
+  "version": 1,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Signature Detections Rate",
+      "targets": [{"expr": "rate(swarm_detection_signature_total[5m])"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Anomaly Detections Rate",
+      "targets": [{"expr": "rate(swarm_detection_anomaly_total[5m])"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "True Positives (rate)",
+      "targets": [{"expr": "rate(swarm_detection_true_positives_total[5m])"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "False Positives (rate)",
+      "targets": [{"expr": "rate(swarm_detection_false_positives_total[5m])"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "False Negatives (rate)",
+      "targets": [{"expr": "rate(swarm_detection_false_negatives_total[5m])"}]
+    },
+    {
+      "type": "gauge",
+      "title": "False Positive Ratio (approx)",
+      "targets": [{"expr": "(swarm_detection_false_positives_total)/(swarm_detection_false_positives_total + swarm_detection_true_positives_total)"}]
+    },
+    {
+      "type": "gauge",
+      "title": "Detection Rate (approx)",
+      "targets": [{"expr": "(swarm_detection_true_positives_total)/(swarm_detection_true_positives_total + swarm_detection_false_negatives_total)"}]
+    },
+    {
+      "type": "timeseries",
+      "title": "Ingest Encode Latency p95 (ms)",
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le)(rate(swarm_ingest_encode_latency_ms_bucket[5m])))"}]
+    },
+    {
+      "type": "piechart",
+      "title": "Detection Severity Distribution",
+      "targets": [
+        {"expr": "swarm_detection_critical_total", "legendFormat": "Critical"},
+        {"expr": "swarm_detection_high_total", "legendFormat": "High"},
+        {"expr": "swarm_detection_medium_total", "legendFormat": "Medium"},
+        {"expr": "swarm_detection_low_total", "legendFormat": "Low/Info"}
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Detection by Severity (rate)",
+      "targets": [
+        {"expr": "rate(swarm_detection_critical_total[5m])", "legendFormat": "Critical"},
+        {"expr": "rate(swarm_detection_high_total[5m])", "legendFormat": "High"},
+        {"expr": "rate(swarm_detection_medium_total[5m])", "legendFormat": "Medium"},
+        {"expr": "rate(swarm_detection_low_total[5m])", "legendFormat": "Low/Info"}
+      ]
+    }
+  ]
+}

@@ -48,6 +48,117 @@ Phạm vi: Xây dựng nền tảng vi kiến trúc (microservices) mở rộng,
 | Phase 3 – Scaling & Intelligence | Tháng 7-9 | Evolution engine, inference optimization, control plane, edge manager, policy | Latency < 50ms P95; Federated learning đa tầng; Policy dynamic rollout < 5m; 500 nodes beta |
 | Phase 4 – Hardening & Production | Tháng 10-12 | Billing, portal, audit, compliance, performance tuning, SRE playbooks | 99.99% HA tests; Detection ≥ 99%; False positive < 0.1%; Chaos tests pass; Ready for GA |
 
+### 3.1 HÀNH ĐỘNG ƯU TIÊN (CẬP NHẬT 01/10/2025)
+Mục tiêu: Hoàn tất các thành phần còn thiếu để đạt Exit Criteria Phase 1 trong 4 tuần tới và chuẩn bị nền tảng Phase 2.
+
+#### P0-1: Detection Pipeline (Deadline: 08/10)
+Owner: Rust Team  | Trạng thái: Pending
+Tasks:
+- Signature matching engine (YAML rule: id, pattern, severity, action)
+- Baseline anomaly heuristic (sliding window 1m/5m/15m, thresholds env-driven)
+- Publish `threat.v1.alert.detected` (NATS) với trace context
+- Metrics: `swarm_detection_anomaly_total`, `swarm_detection_signature_total`
+Exit Criteria:
+- Detection rate ≥ 85% (synthetic dataset)
+- False positive < 2%
+- Throughput ≥ 10K events/s với detection bật
+- Integration test alert flow pass
+
+#### P0-2: End-to-End Integration Test (Deadline: 11/10)
+Owner: QA / Platform  | Trạng thái: Pending
+Scope:
+- Docker compose full stack: sensor-gateway, swarm-gossip, consensus-core, control-plane, NATS
+- Test script: inject malicious event → expect alert → assert latency & trace continuity
+- CI workflow `e2e-test.yml` (PR + nightly)
+Exit Criteria:
+- ≥95% pass rate
+- P95 end-to-end latency < 500ms
+- Trace context preserved across 4 hops
+
+#### P0-3: Identity/PKI Core (Deadline: 15/10)
+Owner: Security Team  | Trạng thái: Pending
+Tasks:
+- Root & intermediate CA (offline root simulation)
+- gRPC IssueCertificate(CSR) + CRL endpoint
+- Secure join: token → signed cert → mTLS handshake
+- PQC hybrid stub (X25519 + Kyber768) benchmark (PoC only)
+Exit Criteria:
+- 1000 certs/min issuance sustained
+- Join latency < 2s P95
+- mTLS established between 2 sample services
+- CRL checked on validation path
+
+#### P1-4: Consensus Hardening (Deadline: 15/10)
+Owner: Consensus Team  | Trạng thái: Pending
+Tasks:
+- Persist votes (RocksDB) & recovery after crash
+- View change timeout & leader re-election logic
+- Metrics: `consensus_round_duration_ms`, `consensus_view_changes_total`
+- Safety property tests (agreement, termination) + simulated partition
+Exit Criteria:
+- No stall after single leader failure (f=1, n=4)
+- View change completes < 2x timeout
+- Latency ≤ 300ms P95 (simulated 25 nodes)
+
+#### P1-5: Chaos Testing Framework (Deadline: 18/10)
+Owner: SRE Team  | Trạng thái: Pending
+Scenarios:
+- Network: +200ms latency, 10% loss, node partition
+- Process: random crash 30% nodes
+- Resource: CPU throttle, memory pressure
+- Disk: fill to 95% then release
+Exit Criteria:
+- Pass ≥ 8/10 scenarios
+- MTTR < 30s single node crash
+- No cascading failure observed
+
+Timeline (tổng quan):
+```
+Week 1 (01-08/10): Detection Pipeline
+Week 2 (08-15/10): E2E Test + Identity/PKI + Consensus Hardening
+Week 3 (15-18/10): Chaos Framework
+Week 4 (18-29/10): Stabilize & Phase 1 Exit Review
+```
+
+Risk Notes:
+- Chưa có detection logic → blocker demo end-to-end.
+- PKI chậm sẽ trì hoãn adoption mTLS ở Phase 2.
+- Thiếu persistence consensus → nguy cơ state loss sau restart.
+- Chưa có chaos validation → rủi ro ẩn trong failure modes.
+
+Review mốc: Phase 1 Exit Review (29/10/2025)
+
+
+#### 3.1.1 NEXT STEPS (Incremental Additions 01/10/2025 - Bổ sung)
+Các hạng mục dưới đây được phân tầng theo mức độ ưu tiên (P0 > P1 > P2) nhằm thu hẹp khoảng cách còn lại của Exit Criteria Phase 1 và chuẩn bị nền tảng mở rộng Phase 2. Đây là phần bổ sung động và sẽ được cập nhật tuần/lần.
+
+| Priority | Task | Purpose / Lý do | Phạm vi chính | Success / Exit Criteria | Owner (dự kiến) | Target Start |
+|----------|------|-----------------|---------------|-------------------------|-----------------|--------------|
+| P0 | Integration test detection + NATS | Đảm bảo đường đi alert end-to-end hoạt động thực tế (ingest → detect → publish) | Compose stack tối thiểu (sensor-gateway, NATS) + script inject payload + assert subject `threat.v1.alert.detected` | Test script PASS trong CI (PR + nightly), latency alert publish < 150ms P95 | QA / Platform + Rust | 02/10 |
+| P0 | Benchmark overhead detection (trước/sau) | Kiểm soát regression hiệu năng khi bật detection | Criterion benchmark + runtime bench (10K events/s synthetic) so sánh CPU%, throughput | Overhead CPU ≤ +15% so baseline; Throughput giữ ≥ 10K ev/s | Rust Perf | 03/10 |
+| P1 | Thêm metrics detection & expose dashboard | Quan sát & cảnh báo sớm drift hoặc FP tăng | Instrument counters (`swarm_detection_signature_total`, `swarm_detection_anomaly_total`, FP ratio) + Grafana panel + alert rule | Dashboard xuất hiện trong folder Security; Alert rule firing nếu FP > 2% 10m | Observability | 05/10 |
+| P1 | Add view change timeout & test | Hoàn thiện resilience consensus (leader failure) | Thêm timer round, trigger view change, unit + sim test (crash leader) | View change < 2x timeout; test pass n=4 với 1 leader crash | Consensus Team | 07/10 |
+| P2 | Chaos workflow (weekly) | Bắt đầu baseline resilience & thu thập MTTR lịch sử | GH workflow chạy script `scripts/chaos/*.sh` chế độ dry-run + optional real run nightly hoặc weekly | Workflow artifact log + report MTTR initial; Không phá vỡ pipeline | SRE | 12/10 |
+
+Ghi chú triển khai:
+- Hai hạng mục P0 chạy song song nhưng Integration test merge trước để phục vụ benchmark alert latency.
+- Benchmark sẽ sinh thêm cột `detection_enabled` vào `perf-trend.csv` để so sánh trực quan.
+- Metrics detection cần thống nhất naming convention (tiền tố `swarm_detection_`).
+- View change test dùng mô phỏng crash: dừng thread leader hoặc inject fault handler.
+- Chaos workflow giai đoạn đầu có thể chạy chế độ "validate scripts" (exit 0) trước khi kích hoạt thật.
+
+Rủi ro & Giảm thiểu:
+- Test flakiness NATS: thêm retry publish/subscribe (backoff) trong test harness.
+- Benchmark sai lệch do warmup: chạy 2 pass (discard pass 1) giữ số liệu ổn định.
+- View change timer drift: dùng `tokio::time::sleep` + cấu hình timeout qua ENV để dễ điều chỉnh.
+- Chaos script có thể yêu cầu quyền cao: chế độ dry-run trong CI để tránh failure permission.
+
+Liên kết KPI:
+- P0 tasks trực tiếp unlock KPI Detection Rate & Throughput Phase 1.
+- P1 tasks đóng góp vào giảm FP & đảm bảo latency consensus.
+- P2 chaos workflow tạo dữ liệu baseline cho Reliability KPI (availability & MTTR) các phase sau.
+
+
 ---
 ## 4. LỘ TRÌNH THEO THÁNG (DETAILED TIMELINE)
 ### Tháng 1

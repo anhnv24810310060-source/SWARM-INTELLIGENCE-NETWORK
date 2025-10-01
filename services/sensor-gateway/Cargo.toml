@@ -19,6 +19,23 @@ opentelemetry-otlp = "0.15"
 tracing-opentelemetry = "0.24"
 fxhash = "0.2"
 hostname = "0.3"
+swarm-resilience = { path = "../../libs/rust/resilience" }
+notify = "6"
+tokio-stream = "0.1"
+regex = "1"
+parking_lot = "0.12"
+thiserror = "1"
+sha2 = "0.10"
+ed25519-dalek = { version = "1", features=["rand"] }
+rand = "0.8"
 
 [features]
 integration = []
+
+[dev-dependencies]
+criterion = { version = "0.5", features=["async_tokio"] }
+tokio = { version = "1", features=["full"] }
+
+[[bench]]
+name = "detection_overhead"
+harness = false

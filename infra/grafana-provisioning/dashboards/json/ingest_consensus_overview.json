@@ -1,0 +1,12 @@
+{
+  "__inputs": [],
+  "title": "Ingest & Consensus Overview",
+  "panels": [
+    {"type": "timeseries", "title": "Ingest Rate (events/s)", "targets": [{"expr": "rate(swarm_ingest_events_total[1m])"}]},
+    {"type": "timeseries", "title": "Ingest Errors (rate)", "targets": [{"expr": "rate(swarm_ingest_errors_total[1m])"}]},
+    {"type": "stat", "title": "Degraded Mode Count", "targets": [{"expr": "swarm_ingest_degraded_mode_total"}]},
+    {"type": "timeseries", "title": "Consensus Rounds (placeholder)", "targets": [{"expr": "increase(svc_consensus_round_total[5m])"}]}
+  ],
+  "schemaVersion": 39,
+  "version": 1
+}

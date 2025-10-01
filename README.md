@@ -1,5 +1,17 @@
 # SWARM INTELLIGENCE NETWORK
 
+<p align="left">
+<a href="../../actions/workflows/perf-nightly.yml"><img src="https://github.com/anhnv24810310060-source/SWARM-INTELLIGENCE-NETWORK/actions/workflows/perf-nightly.yml/badge.svg" alt="nightly-perf" /></a>
+<a href="../../actions/workflows/perf-pr-comment.yml"><img src="https://github.com/anhnv24810310060-source/SWARM-INTELLIGENCE-NETWORK/actions/workflows/perf-pr-comment.yml/badge.svg" alt="perf-regression-pr" /></a>
+</p>
+
+<p align="right">
+<strong>Hiệu năng gần đây:</strong>
+<a href="docs/perf-trend.csv">trend CSV</a>
+|
+<img src="docs/perf-sparkline.svg" alt="perf sparkline" />
+</p>
+
 Nền tảng bảo mật phân tán mô phỏng hệ miễn dịch số, kiến trúc microservices đa ngôn ngữ (Rust / Go / Python) với cơ chế học liên kết (federated learning), đồng thuận PBFT tùy biến và tiến hóa tự động (evolutionary optimization).
 
 ## 1. Mục tiêu
@@ -89,3 +101,7 @@ Xem `roadmap-12-months.md` để biết chi tiết milestone theo tháng.
 
 ---
 Tài liệu sẽ tiếp tục được mở rộng cùng tiến trình dự án.
+
+### Theo dõi hiệu năng
+- File `docs/perf-trend.csv` được cập nhật tự động mỗi đêm (UTC 02:00) – có thể import vào Grafana/Sheets để dựng biểu đồ regression.
+

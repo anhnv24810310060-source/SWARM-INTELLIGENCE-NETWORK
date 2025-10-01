@@ -1,0 +1,43 @@
+name: jetstream-validate
+
+on:
+  push:
+    paths:
+      - 'infra/jetstream-spec.yaml'
+      - 'scripts/validate_jetstream.sh'
+      - 'scripts/provision_jetstream.sh'
+      - '.github/workflows/jetstream-validate.yml'
+  schedule:
+    - cron: '30 2 * * *'  # 02:30 UTC daily
+  workflow_dispatch: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      nats:
+        image: nats:2.10
+        ports:
+          - 4222:4222
+        # Use options to append args (-js) since 'command' key isn't supported in services.
+        options: >-
+          --health-cmd='nats --help >/dev/null 2>&1 || true' --health-interval=5s --health-timeout=5s --health-retries=20
+          --entrypoint "nats-server" nats:2.10 -js
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install nats CLI & jq & yq
+        run: |
+          curl -sSL https://github.com/nats-io/natscli/releases/download/v0.1.5/nats-0.1.5-linux-amd64 -o /usr/local/bin/nats
+          chmod +x /usr/local/bin/nats
+          sudo apt-get update -y && sudo apt-get install -y jq
+          sudo wget -q -O /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.1/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+      - name: Provision streams
+        run: |
+          chmod +x scripts/provision_jetstream.sh
+          NATS_URL=nats://127.0.0.1:4222 ./scripts/provision_jetstream.sh || true
+      - name: Validate spec vs live (warnings only)
+        run: |
+          chmod +x scripts/validate_jetstream.sh
+          NATS_URL=nats://127.0.0.1:4222 ./scripts/validate_jetstream.sh || true

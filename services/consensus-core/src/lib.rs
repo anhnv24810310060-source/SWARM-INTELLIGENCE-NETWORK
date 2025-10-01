@@ -1,9 +1,16 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
+use once_cell::sync::Lazy;
+static DB: Lazy<Option<sled::Db>> = Lazy::new(|| {
+    let path = std::env::var("CONSENSUS_DB_PATH").unwrap_or_else(|_| "./data/consensus".into());
+    match sled::open(path) { Ok(db) => Some(db), Err(e) => { tracing::warn!(error=?e, "sled open failed - running ephemeral"); None } }
+});
 use async_trait::async_trait;
 use tonic::{Request, Response, Status};
 use swarm_proto::consensus::{pbft_server::Pbft, Proposal, Vote, Ack, ConsensusStateQuery, ConsensusState};
 use tracing::instrument;
+mod view_change;
 
 #[derive(Debug, Default)]
 pub struct PbftState {
@@ -17,6 +24,7 @@ pub struct PbftState {
 pub struct PbftService {
     state: Arc<RwLock<PbftState>>,
     votes: Arc<RwLock<HashMap<(u64,u64), HashSet<String>>>>, // (height,round) -> voters
+    round_starts: Arc<RwLock<HashMap<(u64,u64), Instant>>>, // track start time for (height,round)
 }
 
 impl PbftService {
@@ -24,7 +32,11 @@ impl PbftService {
         let size: usize = std::env::var("VALIDATOR_SET_SIZE").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
         let validators = (0..size).map(|i| format!("node-{}", i)).collect::<Vec<_>>();
         let leader = validators.first().cloned().unwrap_or_default();
-        Self { state: Arc::new(RwLock::new(PbftState { validators: validators.clone(), leader, ..Default::default() })), votes: Arc::new(RwLock::new(HashMap::new())) }
+    let svc = Self { state: Arc::new(RwLock::new(PbftState { validators: validators.clone(), leader, ..Default::default() })), votes: Arc::new(RwLock::new(HashMap::new())), round_starts: Arc::new(RwLock::new(HashMap::new())) };
+        svc.load_votes();
+        // spawn view change timer task
+        svc.spawn_view_change_task();
+        svc
     }
     pub fn snapshot(&self) -> PbftState { self.state.read().unwrap().clone() }
 
@@ -37,6 +49,8 @@ impl PbftService {
         let mut map = self.votes.write().unwrap();
         let entry = map.entry((height, round)).or_insert_with(HashSet::new);
         entry.insert(node.to_string());
+        // persist single vote (idempotent based on key)
+        if let Some(db) = &*DB { let _ = db.insert(format!("vote:{}:{}:{}", height, round, node), &[]); }
         entry.len()
     }
 
@@ -45,6 +59,21 @@ impl PbftService {
         if st.validators.is_empty() { return; }
         let idx = (height + round) as usize % st.validators.len();
         st.leader = st.validators[idx].clone();
+    }
+
+    fn load_votes(&self) {
+        if let Some(db) = &*DB {
+            let mut map = self.votes.write().unwrap();
+            for kv in db.scan_prefix("vote:") { if let Ok((k,_)) = kv {
+                if let Ok(s) = std::str::from_utf8(&k) { // vote:height:round:node
+                    let parts: Vec<&str> = s.split(':').collect();
+                    if parts.len()==4 { if let (Ok(h), Ok(r)) = (parts[1].parse::<u64>(), parts[2].parse::<u64>()) {
+                        map.entry((h,r)).or_insert_with(HashSet::new).insert(parts[3].to_string());
+                    }}
+                }
+            }}
+            tracing::info!(restored_votes=map.len(), "restored_votes_from_persistence");
+        }
     }
 }
 
@@ -57,6 +86,10 @@ impl Pbft for PbftService {
         {
             let mut st = self.state.write().unwrap();
             if prop.height > st.height { st.height = prop.height; st.round = prop.round; broadcast = Some((st.height, st.round)); }
+        }
+        // record round start time (height,round)
+        if let Some((h,r)) = broadcast {
+            self.round_starts.write().unwrap().insert((h,r), Instant::now());
         }
         // Leader re-elected on new height
         if let Some((h,r)) = broadcast { self.elect_leader(h, r); }
@@ -76,6 +109,13 @@ impl Pbft for PbftService {
         if count >= quorum {
             self.elect_leader(vote.height, vote.round);
             tracing::info!(height=vote.height, round=vote.round, quorum=%quorum, votes=%count, leader=%self.snapshot().leader, "quorum_reached");
+            // record round progress duration metric
+            if let Some(start) = self.round_starts.write().unwrap().remove(&(vote.height, vote.round)) {
+                let dur_ms = start.elapsed().as_secs_f64() * 1000.0;
+                let meter = opentelemetry::global::meter("consensus-core");
+                let hist = meter.f64_histogram("consensus_round_progress_ms").with_description("Time from propose to quorum for a (height,round)").init();
+                hist.record(dur_ms, &[]);
+            }
             let h = vote.height; let r = vote.round;
             tokio::spawn(async move { super::publish_round_changed(h,r).await; });
         }

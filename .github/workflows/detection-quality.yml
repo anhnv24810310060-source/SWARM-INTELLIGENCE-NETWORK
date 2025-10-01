@@ -1,0 +1,180 @@
+name: detection-quality
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 3 * * *' # daily 03:00 UTC
+  push:
+    paths:
+      - 'scripts/**'
+      - 'services/sensor-gateway/**'
+      - 'configs/detection-rules.yaml'
+      - '.github/workflows/detection-quality.yml'
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          profile: minimal
+          override: true
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python deps
+        run: |
+          pip install --upgrade pip
+          pip install orjson
+      
+      - name: Build sensor-gateway
+        run: cargo build -p sensor-gateway --release
+
+      - name: Generate synthetic labeled data
+        run: |
+          python scripts/gen_synthetic_threats.py > labeled.jsonl
+
+      - name: Run sensor-gateway to produce detections
+        env:
+          DETECTION_ENABLED: 'true'
+          DETECTION_LOG_PATH: detections.log
+        run: |
+          # feed labeled events payloads into gateway stdin simulating ingest
+          head -n 200 labeled.jsonl | jq -r '.payload' | ./target/release/sensor-gateway 2>&1 | tee gateway.out || true
+          # sensor-gateway may run indefinitely; we only need initial pass so kill after short time
+        timeout-minutes: 1
+
+      - name: Compute detection quality
+        run: |
+          python scripts/calc_detection_quality.py --detections detections.log --labeled labeled.jsonl --csv docs/detection-quality.csv --weighted > quality.json
+          cat quality.json
+          echo "QUALITY_JSON<<EOF" >> $GITHUB_ENV
+          cat quality.json >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: Compute delta (if CSV has history)
+        id: delta
+        run: |
+          # Extract last two rows from CSV to compute delta
+          if [ $(wc -l < docs/detection-quality.csv) -gt 2 ]; then
+            PREV=$(tail -n 2 docs/detection-quality.csv | head -n 1)
+            CURR=$(tail -n 1 docs/detection-quality.csv)
+            
+            # Handle both weighted and non-weighted CSV formats
+            NCOLS=$(echo "$CURR" | awk -F',' '{print NF}')
+            
+            if [ "$NCOLS" -ge 10 ]; then
+              # Weighted format: columns 5-7 (P/R/F1), 8-10 (weighted P/R/F1)
+              PREV_P=$(echo $PREV | cut -d',' -f5)
+              PREV_R=$(echo $PREV | cut -d',' -f6)
+              PREV_F=$(echo $PREV | cut -d',' -f7)
+              PREV_WF=$(echo $PREV | cut -d',' -f10)
+              CURR_P=$(echo $CURR | cut -d',' -f5)
+              CURR_R=$(echo $CURR | cut -d',' -f6)
+              CURR_F=$(echo $CURR | cut -d',' -f7)
+              CURR_WF=$(echo $CURR | cut -d',' -f10)
+              DELTA_WF=$(awk "BEGIN {printf \"%.4f\", $CURR_WF - $PREV_WF}")
+              echo "weighted_f1=$CURR_WF" >> $GITHUB_OUTPUT
+              echo "delta_weighted_f1=$DELTA_WF" >> $GITHUB_OUTPUT
+            else
+              # Non-weighted format
+              PREV_P=$(echo $PREV | cut -d',' -f5)
+              PREV_R=$(echo $PREV | cut -d',' -f6)
+              PREV_F=$(echo $PREV | cut -d',' -f7)
+              CURR_P=$(echo $CURR | cut -d',' -f5)
+              CURR_R=$(echo $CURR | cut -d',' -f6)
+              CURR_F=$(echo $CURR | cut -d',' -f7)
+            fi
+            
+            DELTA_P=$(awk "BEGIN {printf \"%.4f\", $CURR_P - $PREV_P}")
+            DELTA_R=$(awk "BEGIN {printf \"%.4f\", $CURR_R - $PREV_R}")
+            DELTA_F=$(awk "BEGIN {printf \"%.4f\", $CURR_F - $PREV_F}")
+            echo "has_delta=true" >> $GITHUB_OUTPUT
+            echo "delta_precision=$DELTA_P" >> $GITHUB_OUTPUT
+            echo "delta_recall=$DELTA_R" >> $GITHUB_OUTPUT
+            echo "delta_f1=$DELTA_F" >> $GITHUB_OUTPUT
+            echo "current_precision=$CURR_P" >> $GITHUB_OUTPUT
+            echo "current_f1=$CURR_F" >> $GITHUB_OUTPUT
+          else
+            echo "has_delta=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Quality gate check (soft enforcement)
+        id: gate
+        if: steps.delta.outputs.has_delta == 'true'
+        run: |
+          CURR_P=${{ steps.delta.outputs.current_precision }}
+          DELTA_F=${{ steps.delta.outputs.delta_f1 }}
+          GATE_FAIL=false
+          WARNINGS=""
+          
+          # Check if precision drops below 0.85
+          if (( $(awk "BEGIN {print ($CURR_P < 0.85)}") )); then
+            GATE_FAIL=true
+            WARNINGS="${WARNINGS}⚠️  Precision dropped below 0.85 threshold (current: ${CURR_P})\n"
+          fi
+          
+          # Check if F1 drops more than 5%
+          if (( $(awk "BEGIN {print ($DELTA_F < -0.05)}") )); then
+            GATE_FAIL=true
+            WARNINGS="${WARNINGS}⚠️  F1 score dropped more than 5% (delta: ${DELTA_F})\n"
+          fi
+          
+          if [ "$GATE_FAIL" = true ]; then
+            echo "gate_passed=false" >> $GITHUB_OUTPUT
+            echo -e "$WARNINGS"
+            echo "warnings<<EOF" >> $GITHUB_OUTPUT
+            echo -e "$WARNINGS" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo "gate_passed=true" >> $GITHUB_OUTPUT
+            echo "✅ Quality gate passed"
+          fi
+
+      - name: Append & commit CSV (main branch only)
+        if: github.ref == 'refs/heads/main'
+        run: |
+          if git diff --quiet docs/detection-quality.csv; then
+            echo "No CSV changes"; exit 0; fi
+          git config user.name 'github-actions'
+          git config user.email 'actions@users.noreply.github.com'
+          git add docs/detection-quality.csv
+          git commit -m 'chore: update detection-quality metrics'
+          git push
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: detection-quality
+          path: |
+            detections.log
+            labeled.jsonl
+            quality.json
+            docs/detection-quality.csv
+
+      - name: PR Comment (if in PR)
+        if: github.event_name == 'pull_request'
+        uses: mshick/add-pr-comment@v2
+        with:
+          message: |
+            ## 🎯 Detection Quality Results
+            
+            ```json
+            ${{ env.QUALITY_JSON }}
+            ```
+            
+            ${{ steps.delta.outputs.has_delta == 'true' && format('### 📊 Delta vs Previous Run\n- **Precision**: {0} ({1})\n- **Recall**: {2} ({3})\n- **F1**: {4} ({5})\n{6}', steps.delta.outputs.delta_precision >= '0' && '✅' || '⚠️', steps.delta.outputs.delta_precision, steps.delta.outputs.delta_recall >= '0' && '✅' || '⚠️', steps.delta.outputs.delta_recall, steps.delta.outputs.delta_f1 >= '0' && '✅' || '⚠️', steps.delta.outputs.delta_f1, steps.delta.outputs.weighted_f1 != '' && format('- **Weighted F1**: {0} (Δ {1})', steps.delta.outputs.weighted_f1, steps.delta.outputs.delta_weighted_f1) || '') || '_First run - no delta available_' }}
+            
+            ${{ steps.gate.outputs.gate_passed == 'false' && format('### 🚨 Quality Gate Warnings\n{0}\n**Note**: This is a soft warning and will not block the PR.', steps.gate.outputs.warnings) || '' }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}

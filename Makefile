@@ -40,16 +40,32 @@ python:
 	done
 
 test:
-	@echo "(placeholder) aggregate tests"
-	@echo "[TEST][RUST] running cargo tests with coverage (if tarpaulin installed)"
-	command -v cargo-tarpaulin >/dev/null 2>&1 && cargo tarpaulin -q --workspace --out Xml || echo "tarpaulin not installed" 
-	@echo "[TEST][GO] running go test -cover (summary)"
+	@echo "[TEST] Running unified test + coverage"
+	@if command -v cargo-tarpaulin >/dev/null 2>&1; then \
+	  cargo tarpaulin --workspace --out Xml --output-dir . --quiet || true; \
+	  mv tarpaulin-report.xml ./ || true; \
+	else echo "tarpaulin not installed"; fi
+	@echo "[TEST][GO] generating coverage"
+	@echo "mode=count" > go-workspace.coverage || true
 	@for svc in $(GO_SERVICES); do \
 		if [ -f services/$$svc/go.mod ]; then \
 			( cd services/$$svc && go test ./... -coverprofile=coverage.out >/dev/null 2>&1 || true ); \
+			if [ -f services/$$svc/coverage.out ]; then \
+				grep -h -v "mode:" services/$$svc/coverage.out >> go-workspace.coverage; \
+			fi; \
 		fi; \
 	done
-	@echo "[TEST][PY] pytest coverage (placeholder)"
+	@go tool cover -func=go-workspace.coverage > go-coverage.txt || true
+	@echo "[TEST][PY] running pytest --cov (placeholder if tests exist)"
+	@for svc in $(PY_SERVICES); do \
+	 if [ -d services/$$svc ]; then \
+	   if ls services/$$svc/tests 1>/dev/null 2>&1; then \
+	     (cd services/$$svc && pip install -q pytest pytest-cov >/dev/null 2>&1 && pytest --cov=. --cov-report=xml:coverage-python.xml || true); \
+	     if [ -f services/$$svc/coverage-python.xml ]; then cp services/$$svc/coverage-python.xml ./coverage-python.xml; fi; \
+	   fi; \
+	 fi; \
+	done
+	@bash scripts/coverage_gate.sh || true
 
 format:
 	@echo "(placeholder) run formatters"
@@ -71,11 +87,15 @@ coverage-threshold:
 	@echo "Implement parsing of coverage outputs and fail if below env THRESHOLD"
 
 perf-ingest:
-	@echo "(placeholder) run ingestion throughput benchmark"
-	@echo "Would execute benches or script in future"
+	@echo "[PERF] Running sensor-gateway ingestion benchmarks"
+	@cd services/sensor-gateway && cargo bench --quiet || echo "Bench failed (ensure criterion installed)"
 
 resilience-test:
 	@echo "(placeholder) run resilience tests (circuit breaker simulation)"
+
+test-integration:
+	@echo "Running integration style tests (Rust sensor-gateway run degraded)"
+	cargo test -p sensor-gateway --tests -- --nocapture
 
 security-cargo-audit:
 	@command -v cargo-audit >/dev/null 2>&1 || { echo "Installing cargo-audit"; cargo install cargo-audit >/dev/null 2>&1 || true; }

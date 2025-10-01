@@ -1,0 +1,19 @@
+version: v1
+updated: 2025-10-01T19:10:00Z
+rules:
+  - id: R001
+    name: Suspicious Synthetic Event
+    pattern: "synthetic-event-42"
+    severity: high
+    action: alert
+  - id: R002
+    name: Generic Synthetic Keyword
+    pattern: "synthetic-event-"
+    severity: low
+    action: observe
+  - id: R003
+    name: Malicious Marker Token
+    pattern: "MALICIOUS"
+    severity: critical
+    action: alert
+# Optional signature/public_key fields omitted for brevity in test sample.

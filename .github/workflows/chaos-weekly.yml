@@ -1,0 +1,25 @@
+name: chaos-weekly
+on:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch: {}
+
+jobs:
+  chaos-dry-run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: List chaos scripts
+        run: ls -1 scripts/chaos
+      - name: Dry-run network faults script
+        run: bash scripts/chaos/network_faults.sh dry-run || true
+      - name: Dry-run node kill script
+        run: bash scripts/chaos/node_kill.sh --dry-run "consensus-core" || true
+      - name: Dry-run resource stress script
+        env:
+          MODE: cpu
+          DURATION: 5
+        run: bash scripts/chaos/resource_stress.sh || true
+      - name: Summary
+        run: echo "Chaos dry-run completed (no destructive actions executed)."

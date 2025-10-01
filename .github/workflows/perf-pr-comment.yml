@@ -1,0 +1,68 @@
+name: perf-regression-pr
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/update_perf_baseline.sh'
+      - 'docs/perf-trend.csv'
+      - 'scripts/generate_perf_sparkline.sh'
+      - '.github/workflows/perf-pr-comment.yml'
+  workflow_dispatch: {}
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Run perf update (no commit)
+        env:
+          PERF_REGRESSION_PCT: 10
+        run: |
+          chmod +x scripts/update_perf_baseline.sh
+          ./scripts/update_perf_baseline.sh || true
+      - name: Show regressions
+        id: regress
+        run: |
+          if [[ -f target/perf-regressions.json ]]; then
+            echo "json<<EOF" >> $GITHUB_OUTPUT
+            cat target/perf-regressions.json >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          else
+            echo 'json=[]' >> $GITHUB_OUTPUT
+          fi
+      - name: Comment on PR if regressions
+        if: steps.regress.outputs.json != '[]'
+        uses: actions/github-script@v7
+        env:
+          JSON: ${{ steps.regress.outputs.json }}
+          PCT: 10
+        with:
+          script: |
+            const data = JSON.parse(process.env.JSON);
+            let body = `### ⚠ Hiệu năng regression phát hiện (threshold ${process.env.PCT}% )\n`;
+            body += '| Benchmark | Current | Median 7d | % Change | Threshold |\n|-----------|---------|-----------|----------|-----------|\n';
+            for (const r of data) {
+              body += `| ${r.benchmark} | ${r.current.toFixed(2)} | ${r.median_7d.toFixed(2)} | ${r.pct_change.toFixed(2)}% | ${r.threshold_pct}% |\n`;
+            }
+            body += '\n> Kiểm tra artifact chi tiết: perf-regressions.json';
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body
+            });
+            // Add perf-regression label (create if missing permissions allow)
+            try {
+              await github.rest.issues.addLabels({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                labels: ['perf-regression']
+              });
+            } catch (e) {
+              console.log('Label add failed (maybe missing permission):', e.message);
+            }

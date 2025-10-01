@@ -1,0 +1,57 @@
+groups:
+  - name: detection-quality
+    rules:
+      - alert: HighFalsePositiveRatio
+        expr: (swarm_detection_false_positives_total) / (swarm_detection_false_positives_total + swarm_detection_true_positives_total) > 0.02
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Detection FP ratio high (>2%)"
+          description: "False positive ratio exceeded 2% over the last 15m. Investigate rule tuning."
+      - alert: LowDetectionRate
+        expr: (swarm_detection_true_positives_total) / (swarm_detection_true_positives_total + swarm_detection_false_negatives_total) < 0.85
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Detection rate degraded (<85%)"
+          description: "Detection rate below target threshold for 30m window."
+      
+      - alert: CriticalSeveritySurge
+        expr: rate(swarm_detection_critical_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: critical
+          oncall: page
+        annotations:
+          summary: "Critical severity detections surging"
+          description: "Critical detection rate is {{ $value | humanize }}/s, exceeds 10/s threshold. Immediate investigation required."
+          runbook_url: "https://wiki/runbooks/critical-severity-surge.md"
+          
+      - alert: HighSeveritySpike
+        expr: (rate(swarm_detection_high_total[5m]) / rate(swarm_detection_high_total[5m] offset 1h)) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High severity detections 2× above baseline"
+          description: "High severity rate increased {{ $value | humanize }}× compared to 1h ago. Check for ongoing attack or misconfiguration."
+  - name: consensus-health
+    rules:
+      - alert: ExcessiveViewChanges
+        expr: rate(consensus_view_changes_total[10m]) > 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consensus experiencing frequent view changes"
+          description: "View changes > 10 per 10m may indicate leader instability or network issues."
+      - alert: SlowRoundProgress
+        expr: histogram_quantile(0.95, sum by (le)(rate(consensus_round_progress_ms_bucket[5m]))) > 600
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Consensus round progress slow (p95 > 600ms)"
+          description: "Investigate performance or network delays causing slow quorum formation."

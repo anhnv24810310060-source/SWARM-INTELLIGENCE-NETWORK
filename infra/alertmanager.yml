@@ -1,0 +1,97 @@
+global:
+  resolve_timeout: 5m
+  # Slack API URL (set via environment or vault)
+  slack_api_url: '${SLACK_WEBHOOK_URL}'
+
+route:
+  # Default receiver for all alerts
+  receiver: 'default'
+  # Group alerts by alertname and severity to reduce noise
+  group_by: ['alertname', 'severity', 'component']
+  group_wait: 10s
+  group_interval: 5m
+  repeat_interval: 4h
+  
+  routes:
+    # Critical alerts with oncall=page → PagerDuty
+    - match:
+        oncall: page
+      receiver: 'pagerduty-critical'
+      group_wait: 5s
+      repeat_interval: 30m
+      continue: false
+    
+    # Critical severity → PagerDuty (backup route)
+    - match:
+        severity: critical
+      receiver: 'pagerduty-critical'
+      group_wait: 10s
+      repeat_interval: 1h
+      continue: true  # Also send to Slack
+    
+    # Warning severity → Slack
+    - match:
+        severity: warning
+      receiver: 'slack-warnings'
+      group_wait: 30s
+      repeat_interval: 12h
+
+receivers:
+  - name: 'default'
+    slack_configs:
+      - channel: '#swarm-alerts-default'
+        title: 'SWARM Alert: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Labels.alertname }}
+          *Severity:* {{ .Labels.severity }}
+          *Component:* {{ .Labels.component }}
+          *Summary:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          {{ end }}
+        send_resolved: true
+
+  - name: 'pagerduty-critical'
+    pagerduty_configs:
+      - service_key: '${PAGERDUTY_SERVICE_KEY}'
+        description: '{{ .GroupLabels.alertname }}: {{ .GroupLabels.component }}'
+        details:
+          summary: '{{ .CommonAnnotations.summary }}'
+          description: '{{ .CommonAnnotations.description }}'
+          severity: '{{ .GroupLabels.severity }}'
+          runbook: '{{ .CommonAnnotations.runbook_url }}'
+    slack_configs:
+      - channel: '#swarm-alerts-critical'
+        title: '🚨 CRITICAL: {{ .GroupLabels.alertname }}'
+        text: |
+          *PagerDuty incident created*
+          {{ range .Alerts }}
+          *Alert:* {{ .Labels.alertname }}
+          *Component:* {{ .Labels.component }}
+          *Summary:* {{ .Annotations.summary }}
+          *Runbook:* {{ .Annotations.runbook_url }}
+          {{ end }}
+        send_resolved: true
+        color: danger
+
+  - name: 'slack-warnings'
+    slack_configs:
+      - channel: '#swarm-alerts-warnings'
+        title: '⚠️  Warning: {{ .GroupLabels.alertname }}'
+        text: |
+          {{ range .Alerts }}
+          *Alert:* {{ .Labels.alertname }}
+          *Component:* {{ .Labels.component }}
+          *Summary:* {{ .Annotations.summary }}
+          *Description:* {{ .Annotations.description }}
+          {{ end }}
+        send_resolved: true
+        color: warning
+
+inhibit_rules:
+  # Inhibit warning if critical alert is firing for same component
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['component', 'alertname']

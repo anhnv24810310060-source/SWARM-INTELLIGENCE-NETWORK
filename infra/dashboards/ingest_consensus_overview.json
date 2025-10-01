@@ -21,6 +21,17 @@
       "title": "Consensus Rounds (placeholder)",
       "targets": [ { "expr": "increase(svc_consensus_round_total[5m])" } ]
     }
+    ,
+    {
+      "type": "timeseries",
+      "title": "View Change Rate",
+      "targets": [ { "expr": "rate(consensus_view_changes_total[5m])" } ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Round Progress p95 (ms)",
+      "targets": [ { "expr": "histogram_quantile(0.95, sum by (le)(rate(consensus_round_progress_ms_bucket[5m])))" } ]
+    }
   ],
   "schemaVersion": 39,
   "version": 1
