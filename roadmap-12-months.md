@@ -52,7 +52,7 @@ Phạm vi: Xây dựng nền tảng vi kiến trúc (microservices) mở rộng,
 ## 4. LỘ TRÌNH THEO THÁNG (DETAILED TIMELINE)
 ### Tháng 1
 - Thành lập nhóm kỹ thuật, kiến trúc mục tiêu, chuẩn code & security baseline (Rust + Go guidelines).
-- Xây dựng repo monorepo hoặc polyrepo định danh (quyết định: polyrepo với template chuẩn). 
+- Xây dựng chiến lược repo: ban đầu chọn polyrepo nhưng điều chỉnh sang monorepo (hiện tại) để tăng tốc độ refactor & chia sẻ thư viện giai đoạn nền tảng; sẽ xem xét tách dần khi biên độ thay đổi giảm.
 - Dựng CI/CD: Build (Rust, Go, Python), test, security scan (SAST + Dependency), container signing (Cosign).
 - Implement: `sensor-gateway` (ingest gói cơ bản TCP/HTTP), `node-runtime` skeleton (plugin WASM sandbox), Observability stack (Prometheus, Grafana, Loki, Tempo, OpenTelemetry collector).
 - Kết quả: Agent gửi telemetry và sự kiện thô vào event-bus mock.

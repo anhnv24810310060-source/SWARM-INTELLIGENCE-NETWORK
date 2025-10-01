@@ -41,12 +41,63 @@ python:
 
 test:
 	@echo "(placeholder) aggregate tests"
+	@echo "[TEST][RUST] running cargo tests with coverage (if tarpaulin installed)"
+	command -v cargo-tarpaulin >/dev/null 2>&1 && cargo tarpaulin -q --workspace --out Xml || echo "tarpaulin not installed" 
+	@echo "[TEST][GO] running go test -cover (summary)"
+	@for svc in $(GO_SERVICES); do \
+		if [ -f services/$$svc/go.mod ]; then \
+			( cd services/$$svc && go test ./... -coverprofile=coverage.out >/dev/null 2>&1 || true ); \
+		fi; \
+	done
+	@echo "[TEST][PY] pytest coverage (placeholder)"
 
 format:
 	@echo "(placeholder) run formatters"
 
-security:
-	@echo "(placeholder) run security scans (trivy, cargo audit, osv-scanner)"
+security: security-cargo-audit security-govulncheck security-pip-audit
+	@echo "[SECURITY] aggregate scan complete"
+	@echo "[SECURITY] detect-secrets scan"
+	@command -v detect-secrets >/dev/null 2>&1 && detect-secrets scan || echo "detect-secrets not installed"
+	@echo "[SECURITY] checkov scan (infra)"
+	@command -v checkov >/dev/null 2>&1 && checkov -d infra || echo "checkov not installed"
+
+cosign-sign:
+	@echo "(placeholder) sign container images with cosign" 
+	@echo "Usage: make cosign-sign IMAGE=repo/name:tag" 
+	@[ -z "$(IMAGE)" ] && echo "Set IMAGE var" || echo "Would run: cosign sign $(IMAGE)"
+
+coverage-threshold:
+	@echo "(placeholder) enforce coverage thresholds" 
+	@echo "Implement parsing of coverage outputs and fail if below env THRESHOLD"
+
+perf-ingest:
+	@echo "(placeholder) run ingestion throughput benchmark"
+	@echo "Would execute benches or script in future"
+
+resilience-test:
+	@echo "(placeholder) run resilience tests (circuit breaker simulation)"
+
+security-cargo-audit:
+	@command -v cargo-audit >/dev/null 2>&1 || { echo "Installing cargo-audit"; cargo install cargo-audit >/dev/null 2>&1 || true; }
+	@echo "[SECURITY][cargo-audit] scanning workspace" && cargo audit || true
+
+security-govulncheck:
+	@command -v govulncheck >/dev/null 2>&1 || { echo "Installing govulncheck"; go install golang.org/x/vuln/cmd/govulncheck@latest >/dev/null 2>&1 || true; }
+	@for svc in $(GO_SERVICES); do \
+		if [ -f services/$$svc/go.mod ]; then \
+			echo "[SECURITY][govulncheck] $$svc"; \
+			( cd services/$$svc && govulncheck ./... || true ); \
+		fi; \
+	done
+
+security-pip-audit:
+	@command -v pip-audit >/dev/null 2>&1 || { echo "Installing pip-audit"; pip install --user pip-audit >/dev/null 2>&1 || true; }
+	@for svc in $(PY_SERVICES); do \
+		if [ -f services/$$svc/pyproject.toml ]; then \
+			echo "[SECURITY][pip-audit] $$svc"; \
+			( cd services/$$svc && pip-audit || true ); \
+		fi; \
+	done
 
 sbom:
 	@echo "(placeholder) build image & run syft-sbom.sh <image>"

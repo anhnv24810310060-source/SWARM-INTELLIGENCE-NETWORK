@@ -1,0 +1,21 @@
+syntax = "proto3";
+package swarm.ingestion;
+
+option go_package = "github.com/swarmguard/proto/gen/go/ingestion";
+
+// Canonical raw ingestion event before normalization/enrichment.
+// Versioning: breaking changes bump package (ingestion.v2.* in future) or add new fields reserved numbers.
+message RawEvent {
+  // Unique identifier (uuid or hash) for idempotency.
+  string id = 1;
+  // Epoch millis when observed at edge.
+  uint64 observed_ts = 2;
+  // Source type: file, syslog, pcap, synthetic.
+  string source_type = 3;
+  // Optional origin host / sensor id.
+  string origin = 4;
+  // Arbitrary raw payload (line content, packet hex, JSON fragment...).
+  bytes payload = 5;
+  // Content type hint (e.g. text/plain, application/json, pcap/frame,...)
+  string content_type = 6;
+}

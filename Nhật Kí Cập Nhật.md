@@ -1,3 +1,112 @@
+## [2025-10-01] Quorum, leader mock, schema hash, event taxonomy, control-plane cache
+
+### Thay đổi
+- Thêm quorum + leader election mock (round-robin theo (height+round) % validators) trong `PbftService`.
+- Theo dõi phiếu bầu (HashSet per (height,round)) + log quorum_reached.
+- Build script `swarm-proto` tính SHA256 toàn bộ `.proto` → export `PROTO_SCHEMA_VERSION` env.
+- Sự kiện đổi taxonomy: `consensus.v1.height.changed`, `consensus.v1.round.changed` (versioned prefix + namespace ổn định).
+- Payload sự kiện thêm `proto_schema_version`.
+- `control-plane` thêm NATS subscribe cache height/round + fallback gRPC fetch ban đầu.
+- Thêm integration test (feature `integration`) kiểm tra quorum với 4 validators (3 phiếu đạt quorum).
+
+### Lợi ích
+- Tạo nền móng cho logic PBFT thật (quorum & leader rotation) có thể cắm sâu thêm view change.
+- Version schema đồng bộ qua env build-time giúp audit & debug mismatch giữa services.
+- Event taxonomy chuẩn hoá (namespace + version) hỗ trợ phát triển backward-compatible.
+- Control-plane có kênh đẩy thay vì chỉ pull gRPC (giảm latency cập nhật trạng thái).
+
+### Việc tiếp theo (gợi ý)
+1. Persist quorum votes ephemeral để phục vụ recovery (in-memory hiện mất khi restart).
+2. Thêm round escalation logic (timeout -> round+1 -> re-elect leader).
+3. Kết hợp metrics: xuất quorum achievement counter & leader change counter.
+4. Tạo subject policy doc chuẩn hóa naming toàn hệ thống events.
+5. Thêm integration test multi-height (height progression + multiple quorum cycles).
+
+---
+## [2025-10-01] Pbft refactor, OTEL metrics, retries, versioned events
+
+### Thay đổi
+- Refactor: tách `PbftService` & `PbftState` sang `consensus-core/src/lib.rs` + thêm snapshot API.
+- Thêm unit tests thực (propose tăng height; cast_vote cập nhật round; negative get_state).
+- Thay hardcode metrics port bằng env `CONSENSUS_METRICS_PORT` (mặc định 9102).
+- Thay prometheus crate bằng OpenTelemetry Prometheus exporter (`/metrics`).
+- Control-plane gRPC client thêm exponential backoff (tối đa 5 attempts, delay nhân đôi capped).
+- Sự kiện NATS đổi subject `consensus.height.changed.v1` + payload thêm `proto_schema_version`.
+- Enrich tracing spans: thêm field proposal.id, vote.proposal_id, query.height.
+
+### Lợi ích
+- Dễ test & mở rộng logic PBFT (service di chuyển ra lib).
+- Hợp nhất metrics pipeline (chuẩn hóa theo OTEL, tránh dual stack).
+- Control-plane khởi động ổn định hơn khi consensus chậm sẵn sàng.
+- Versioned events cho phép mở rộng backward compatible.
+- Logging giàu ngữ cảnh giúp debug state races.
+
+### Việc tiếp theo (gợi ý)
+1. Thêm quorum logic & leader election mock.
+2. Expose gauge/counter qua OTEL semantic conventions (naming review).
+3. Add gRPC client pooling + health check circuit breaker.
+4. Thêm end-to-end integration test: propose -> vote -> state height & round.
+5. Proto version embed: derive từ commit hash hoặc buf schema digest.
+
+---
+## [2025-10-01] Consensus client, metrics, NATS broadcast, graceful shutdown
+
+### Thay đổi
+- `control-plane` bổ sung gRPC client (Go) gọi `GetState` từ `consensus-core` (tạm placeholder proto gen Go – cần chạy `buf generate`).
+- `consensus-core` thêm metrics Prometheus (/metrics cổng 9102) với `consensus_height`, `consensus_round`, `consensus_proposals_total`.
+- Broadcast NATS topic `consensus.height.changed` (JSON {height, round}) khi height tăng.
+- Thêm graceful shutdown (SIGINT/SIGTERM) cho gRPC server + flush tracer qua `shutdown_tracer()`.
+- Placeholder test state progression (cần refactor `PbftService` ra lib để test sâu hơn).
+- README cập nhật định hướng hợp nhất metrics qua OpenTelemetry Prometheus exporter.
+
+### Lợi ích
+- Control-plane có thể quan sát trạng thái consensus ngay từ đầu (khởi tạo orchestration logic sau này).
+- Metrics cho phép thiết lập alert / dashboard sớm (height stall, proposal throughput).
+- Sự kiện height thay đổi mở đường replication / trigger hành vi khác (ví dụ flush pending votes).
+- Đảm bảo dừng dịch vụ an toàn và không gây mất span telemetry.
+
+### Hạn chế / Việc dời lại
+- Go proto client đang placeholder: cần chạy `buf generate` để thay thế file giả.
+- Chưa có test logic end-to-end propose→vote (phụ thuộc vào mở rộng service logic PBFT thật).
+- Metrics hiện không qua OTEL pipeline — sẽ chuyển đổi để thống nhất (tránh dual instrumentation).
+
+### Việc tiếp theo (đề xuất)
+1. Refactor `PbftService` sang `lib.rs` để unit test nội bộ real transitions.
+2. Thêm `CastVote` path logic cập nhật leader selection & quorum (mock validator set).
+3. Tích hợp OpenTelemetry metrics exporter Prometheus cho toàn bộ services.
+4. Thêm client retry + backoff cho control-plane khi consensus chưa sẵn sàng.
+5. Ghi version proto trong log ở startup (giúp debug mismatch).
+
+---
+## [2025-10-01] gRPC Pbft server, integration tests, security extended, config reload
+
+### Thay đổi
+- Thêm gRPC Pbft server trong `consensus-core` (tonic) + health riêng cổng `8081`, cổng gRPC cấu hình qua env `CONSENSUS_GRPC_PORT`.
+- Cập nhật crate `swarm-proto` export modules bằng `include_proto!` (common, consensus, events, federation) thay thế include thủ công.
+- Thêm test tích hợp `startup_integration.rs` (feature `integration`) chạy song song `consensus-core` + `swarm-gossip` kiểm tra `/healthz`.
+- Makefile: thêm targets `security-cargo-audit`, `security-govulncheck`, `security-pip-audit` và meta-target `security`.
+- Workflow mới: `.github/workflows/security-extended.yml` (cron hằng ngày) chạy audit Rust / Go / Python.
+- Script bootstrap: `scripts/bootstrap-pre-commit.sh` cài & chạy pre-commit hooks tự động.
+- Script `scripts/fix-license.sh` chèn header Apache 2.0 nếu thiếu (idempotent) cho `.rs .go .py .sh`.
+- Nâng cấp `swarm-core` hỗ trợ cache config với TTL (`SWARM_CONFIG_TTL_SECS`, mặc định 30s), reload file tự động (notify watcher), hàm `force_reload`.
+
+### Lợi ích
+- Nền tảng consensus đã có endpoint gRPC tối giản → sẵn sàng cấy logic PBFT thực.
+- Tăng độ tin cậy CI qua test khởi động đồng thời nhiều service.
+- Khuếch trương phạm vi bảo mật phụ thuộc (đa ngôn ngữ) dưới dạng workflow định kỳ.
+- Giảm ma sát onboarding dev (một lệnh kích hoạt pre-commit).
+- License compliance tự động hóa giảm noise review.
+- Config động có cache & reload giảm áp lực HTTP fetch loop và hỗ trợ thay đổi nóng.
+
+### Việc tiếp theo (đề xuất)
+1. Thêm client gRPC trong các service cần query trạng thái consensus.
+2. Bổ sung metrics (Prometheus exporter) cho consensus vòng/leader.
+3. Thêm test validate propose/cast_vote flow + state progression.
+4. Thêm broadcast kênh sự kiện (NATS / gossip) khi height thay đổi.
+5. Triển khai graceful shutdown cho server (listen SIGTERM) + flush tracer.
+
+---
+
 ## [2025-10-01] Bổ sung proto codegen, telemetry, health, NATS stub, security CI
 
 ## [2025-10-01] Thêm dev-up/dev-down & crate proto Rust

@@ -3,12 +3,30 @@
 use anyhow::Result;
 use tracing::info;
 use once_cell::sync::OnceCell;
+use parking_lot::RwLock;
+use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use notify::{RecommendedWatcher, Watcher, EventKind};
 use opentelemetry::{global, sdk::{trace as sdktrace, Resource}, KeyValue};
 use opentelemetry_otlp::WithExportConfig;
 use axum::{routing::get, Router};
+use once_cell::sync::Lazy;
+use opentelemetry_prometheus::PrometheusExporter;
+use prometheus::{Encoder, TextEncoder};
 use std::net::SocketAddr;
 use serde::Deserialize;
 static OTEL_INIT: OnceCell<()> = OnceCell::new();
+static CONFIG_CACHE: OnceCell<RwLock<CachedConfig>> = OnceCell::new();
+static PROM_INIT: OnceCell<()> = OnceCell::new();
+static EXPORTER: Lazy<RwLock<Option<PrometheusExporter>>> = Lazy::new(|| RwLock::new(None));
+
+#[derive(Debug, Clone)]
+struct CachedConfig {
+    cfg: DynamicConfig,
+    fetched_at: Instant,
+    ttl: Duration,
+    file: Option<PathBuf>,
+}
 
 pub fn init_tracing(service: &str) -> Result<()> {
     OTEL_INIT.get_or_try_init(|| {
@@ -32,12 +50,22 @@ pub fn init_tracing(service: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn shutdown_tracer() {
-    global::shutdown_tracer_provider();
+pub fn shutdown_tracer() { global::shutdown_tracer_provider(); }
+
+pub fn init_metrics() -> Result<()> {
+    PROM_INIT.get_or_try_init(|| {
+        let exporter = opentelemetry_prometheus::exporter().try_init()?;
+        let mut w = EXPORTER.write();
+        *w = Some(exporter);
+        Ok(())
+    })?;
+    Ok(())
 }
 
 pub async fn start_health_server(port: u16) -> Result<()> {
-    let app = Router::new().route("/healthz", get(|| async { "ok" }));
+    let app = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route("/metrics", get(metrics_handler));
     let addr = SocketAddr::from(([0,0,0,0], port));
     tracing::info!(?addr, "Health server listening");
     tokio::spawn(async move {
@@ -60,17 +88,80 @@ impl Default for DynamicConfig {
 }
 
 pub async fn load_config(service: &str) -> Result<DynamicConfig> {
+    // if cache exists & fresh, return it
+    if let Some(lock) = CONFIG_CACHE.get() {
+        let guard = lock.read();
+        if guard.fetched_at.elapsed() < guard.ttl { return Ok(guard.cfg.clone()); }
+    }
     let mut builder = config::Config::builder()
         .set_default("service_name", service)?
         .set_default("nats_url", "127.0.0.1:4222")?
         .set_default("log_level", "info")?;
 
-    if let Ok(file) = std::env::var("SWARM_CONFIG_FILE") { builder = builder.add_source(config::File::with_name(&file).required(false)); }
+    let mut file_path: Option<PathBuf> = None;
+    if let Ok(file) = std::env::var("SWARM_CONFIG_FILE") {
+        file_path = Some(PathBuf::from(&file));
+        builder = builder.add_source(config::File::with_name(&file).required(false));
+    }
     if let Ok(http_url) = std::env::var("SWARM_CONFIG_HTTP") {
         if let Ok(resp) = reqwest::get(http_url.clone()).await { if let Ok(text) = resp.text().await { builder = builder.add_source(config::File::from_str(&text, config::FileFormat::Yaml)); } }
     }
     builder = builder.add_source(config::Environment::with_prefix("SWARM").separator("__"));
     let cfg = builder.build()?;
     let dyn_cfg: DynamicConfig = cfg.try_deserialize()?;
+    let ttl_secs: u64 = std::env::var("SWARM_CONFIG_TTL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
+    let cached = CachedConfig { cfg: dyn_cfg.clone(), fetched_at: Instant::now(), ttl: Duration::from_secs(ttl_secs), file: file_path};
+    let lock = CONFIG_CACHE.get_or_init(|| RwLock::new(cached.clone()));
+    {
+        let mut w = lock.write();
+        *w = cached;
+    }
+    if let Some(f) = lock.read().file.clone() { spawn_file_watcher(f); }
     Ok(dyn_cfg)
+}
+
+fn spawn_file_watcher(path: PathBuf) {
+    tokio::spawn(async move {
+        if let Err(e) = watch_loop(path).await { tracing::warn!(error=?e, "config watch loop exited"); }
+    });
+}
+
+async fn watch_loop(path: PathBuf) -> Result<()> {
+    use tokio::sync::mpsc; 
+    let (tx, mut rx) = mpsc::channel(8);
+    let mut watcher = RecommendedWatcher::new(move |res| { let _ = tx.blocking_send(res); }, notify::Config::default())?;
+    watcher.watch(&path, notify::RecursiveMode::NonRecursive)?;
+    while let Some(evt) = rx.recv().await {
+        if let Ok(ev) = evt { if matches!(ev.kind, EventKind::Modify(_)) { refresh_from_file(&path).await?; } }
+    }
+    Ok(())
+}
+
+async fn refresh_from_file(path: &PathBuf) -> Result<()> {
+    if let Some(lock) = CONFIG_CACHE.get() {
+        if let Ok(text) = tokio::fs::read_to_string(path).await {
+            let builder = config::Config::builder().add_source(config::File::from_str(&text, config::FileFormat::Yaml));
+            if let Ok(cfg) = builder.build() { if let Ok(new_cfg) = cfg.try_deserialize::<DynamicConfig>() { let mut w = lock.write(); w.cfg = new_cfg; w.fetched_at = Instant::now(); } }
+        }
+    }
+    Ok(())
+}
+
+pub async fn force_reload(service: &str) -> Result<DynamicConfig> { load_config(service).await }
+
+async fn metrics_handler() -> axum::response::Response {
+    if EXPORTER.read().is_none() {
+        return axum::response::Response::builder().status(503).body(axum::body::Body::from("metrics not initialized")).unwrap();
+    }
+    let registry = prometheus::default_registry();
+    let metric_families = registry.gather();
+    let mut buf = Vec::new();
+    if let Err(e) = TextEncoder::new().encode(&metric_families, &mut buf) {
+        return axum::response::Response::builder().status(500).body(axum::body::Body::from(format!("encode error: {e}"))).unwrap();
+    }
+    axum::response::Response::builder()
+        .status(200)
+        .header("Content-Type", "text/plain; version=0.0.4")
+        .body(axum::body::Body::from(buf))
+        .unwrap()
 }

@@ -85,6 +85,7 @@ Xem `roadmap-12-months.md` để biết chi tiết milestone theo tháng.
 - Thêm script generate proto.
 - Thêm test harness cluster mini.
 - Triển khai config dynamic + policies.
+- Hợp nhất metrics qua OpenTelemetry -> Prometheus exporter (hiện `consensus-core` tạm dùng prometheus crate + /metrics cổng 9102; sẽ chuyển sang otel-prometheus để thống nhất pipeline.)
 
 ---
 Tài liệu sẽ tiếp tục được mở rộng cùng tiến trình dự án.

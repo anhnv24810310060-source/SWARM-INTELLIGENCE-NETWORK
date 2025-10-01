@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "libs/rust/core",
+    "libs/rust/proto",
+    "services/consensus-core",
+    "services/sensor-gateway",
+    "services/swarm-gossip",
+    "services/identity-ca",
+    "services/inference-gateway",
+    "services/risk-engine",
+    "services/edge-fleet",
+    "services/node-runtime",
+    "services/sensor-gateway",
+    "services/swarm-gossip",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+version = "0.1.0"
