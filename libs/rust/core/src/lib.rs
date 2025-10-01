@@ -180,3 +180,6 @@ async fn metrics_handler() -> axum::response::Response {
         .body(axum::body::Body::from(buf))
         .unwrap()
 }
+
+mod resilience; // new module providing retry & circuit breaker
+pub use resilience::{retry_async, RetryConfig, CircuitBreaker, BreakerState};
