@@ -38,7 +38,10 @@ static NODE_READINESS: AtomicBool = AtomicBool::new(false);
 pub fn mark_ready() { NODE_READINESS.store(true, Ordering::SeqCst); }
 pub fn clear_ready() { NODE_READINESS.store(false, Ordering::SeqCst); }
 pub fn mark_not_live() { NODE_LIVENESS.store(false, Ordering::SeqCst); }
-static DETECTION_METRICS: Lazy<DetectionMetrics> = Lazy::new(|| {
+/// Global detection metrics handle (initialized lazily).
+/// Exposed publicly for services to record detection events, while
+/// keeping construction encapsulated here to ensure consistent naming.
+pub static DETECTION_METRICS: Lazy<DetectionMetrics> = Lazy::new(|| {
     DetectionMetrics {
         signature_total: DETECTION_METER.u64_counter("swarm_detection_signature_total")
             .with_description("Total signature-based detection matches")
@@ -262,6 +265,8 @@ mod resilience; // new module providing retry & circuit breaker
 pub use resilience::{retry_async, RetryConfig, CircuitBreaker, BreakerState};
 pub mod resilience_telemetry; // telemetry metrics for resilience primitives
 pub use resilience_telemetry::{register_metrics as register_resilience_metrics, ResilienceMetrics};
+pub mod config_signature; // configuration signature verification (stub for now)
+pub use config_signature::verify_config_signature;
 
 // Advanced swarm intelligence modules
 pub mod ml_detection;
