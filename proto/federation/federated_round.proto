@@ -1,0 +1,32 @@
+syntax = "proto3";
+package swarm.federation;
+
+option go_package = "github.com/swarmguard/proto/gen/go/federation";
+
+message RoundInit {
+  string round_id = 1;
+  string model_version = 2;
+  uint32 expected_clients = 3;
+}
+
+message ClientUpdate {
+  string round_id = 1;
+  string client_id = 2;
+  bytes weights_delta = 3;
+  float sample_fraction = 4;
+}
+
+message AggregatedModel {
+  string round_id = 1;
+  string new_version = 2;
+  bytes weights = 3;
+}
+
+service FederatedCoordinator {
+  rpc StartRound(RoundInit) returns (Ack) {}
+  rpc SubmitUpdate(ClientUpdate) returns (Ack) {}
+  rpc GetAggregated(RoundQuery) returns (AggregatedModel) {}
+}
+
+message RoundQuery { string round_id = 1; }
+message Ack { bool ok = 1; string message = 2; }

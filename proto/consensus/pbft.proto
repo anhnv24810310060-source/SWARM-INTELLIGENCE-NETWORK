@@ -1,0 +1,31 @@
+syntax = "proto3";
+package swarm.consensus;
+
+option go_package = "github.com/swarmguard/proto/gen/go/consensus";
+
+message Proposal {
+  string id = 1;
+  bytes payload = 2;
+  uint64 height = 3;
+  uint64 round = 4;
+}
+
+message Vote {
+  string proposal_id = 1;
+  string node_id = 2;
+  uint64 height = 3;
+  uint64 round = 4;
+  enum VoteType { PREPARE = 0; COMMIT = 1; };
+  VoteType vote_type = 5;
+}
+
+message ConsensusStateQuery { uint64 height = 1; }
+message ConsensusState { uint64 height = 1; uint64 round = 2; string leader = 3; }
+
+service Pbft {
+  rpc Propose(Proposal) returns (Ack) {}
+  rpc CastVote(Vote) returns (Ack) {}
+  rpc GetState(ConsensusStateQuery) returns (ConsensusState) {}
+}
+
+message Ack { bool accepted = 1; string reason = 2; }

@@ -1,0 +1,18 @@
+[package]
+name = "swarm-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tracing = "0.1"
+serde = { version="1", features=["derive"] }
+anyhow = "1"
+opentelemetry = { version = "0.21", features=["rt-tokio"] }
+opentelemetry-otlp = { version = "0.14", features=["grpc-tonic"] }
+tracing-opentelemetry = "0.22"
+once_cell = "1"
+axum = { version = "0.7", features=["macros"] }
+tokio = { version = "1", features=["rt-multi-thread","macros"] }
+reqwest = { version = "0.12", features=["json","rustls-tls"] }
+config = "0.14"
+serde_yaml = "0.9"

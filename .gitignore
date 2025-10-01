@@ -1,0 +1,40 @@
+# General
+.DS_Store
+.idea/
+.vscode/
+.env*
+*.log
+
+# Rust
+/target/
+**/target/
+Cargo.lock
+
+# Go
+bin/
+coverage.out
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node / Frontend
+node_modules/
+.next/
+yarn.lock
+pnpm-lock.yaml
+
+# Containers
+*.img
+
+# Build artifacts
+dist/
+build/
+
+# Coverage
+coverage/
+**/coverage/
+
+# Generated code
+proto/gen/

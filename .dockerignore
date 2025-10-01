@@ -1,0 +1,10 @@
+target
+node_modules
+__pycache__
+*.pyc
+.git
+.gitignore
+Dockerfile
+*.log
+proto/gen
+.env*

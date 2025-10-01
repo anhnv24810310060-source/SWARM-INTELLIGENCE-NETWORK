@@ -1,0 +1,21 @@
+syntax = "proto3";
+package swarm.events;
+
+option go_package = "github.com/swarmguard/proto/gen/go/events";
+
+message SecurityEvent {
+  string id = 1;
+  string source_node = 2;
+  int64 ts_unix_ms = 3;
+  string category = 4; // anomaly, signature, intel
+  string severity = 5; // low, medium, high, critical
+  string description = 6;
+  bytes raw = 7;
+  map<string,string> metadata = 8;
+}
+
+service EventIngest {
+  rpc Publish(SecurityEvent) returns (PublishAck) {}
+}
+
+message PublishAck { bool ok = 1; string id = 2; }

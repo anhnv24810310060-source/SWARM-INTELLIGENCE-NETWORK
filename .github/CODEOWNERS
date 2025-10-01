@@ -1,0 +1,6 @@
+# CODEOWNERS
+# Pattern order matters; last match wins.
+* @your-org/security-team
+/libs/rust/core/ @your-org/rust-core
+/services/sensor-gateway/ @your-org/edge-ingest
+/services/swarm-gossip/ @your-org/networking
