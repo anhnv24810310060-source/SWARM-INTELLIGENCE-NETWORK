@@ -3,11 +3,14 @@ use tracing::{info, warn, error};
 use swarm_core::{init_tracing, start_health_server, init_metrics};
 use swarm_proto::ingestion::RawEvent;
 mod detection;
+mod nats_pool;
 use detection::{RuleSet, load_rules, AnomalyDetector, AnomalyConfig, DetectionEngine};
+use nats_pool::NatsPool;
 use swarm_resilience::{retry_async, CircuitBreaker};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::path::Path;
 use std::io::Write; // for detection log append
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::fs::File;
 use prost::Message;
@@ -42,9 +45,11 @@ pub async fn run() -> Result<()> {
     start_health_server(8080).await?;
     info!(target: "sensor-gateway", "Starting sensor-gateway service");
     let metrics = init_metrics();
-    let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "127.0.0.1:4222".into());
-    let mut nats_conn = match async_nats::connect(&nats_url).await {
-        Ok(c) => { info!(target:"sensor-gateway", %nats_url, "Connected to NATS"); Some(c) },
+    // Initialize NATS connection pool with resilience
+    let nats_url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".into());
+    let pool_size = std::env::var("NATS_POOL_SIZE").ok().and_then(|s| s.parse().ok()).unwrap_or(4);
+    let mut nats_pool = match NatsPool::new(&nats_url, pool_size).await {
+        Ok(p) => { info!(target:"sensor-gateway", %nats_url, pool_size, "Connected to NATS with connection pool"); Some(Arc::new(p)) },
         Err(e) => { warn!(error=?e, "NATS unavailable - degraded mode"); metrics.degraded_total.add(1, &[]); None }
     };
     // Detection engine setup
@@ -60,17 +65,21 @@ pub async fn run() -> Result<()> {
     // Hot reload watcher
     tokio::spawn(watch_rules(rules_path.clone(), ruleset.clone(), verify_rules, external_pk.clone()));
     let cb = CircuitBreaker::new(3, std::time::Duration::from_secs(5));
-    if let Some(nc) = &nats_conn { publish_with_resilience(nc, &cb, "ingest.v1.status", b"online").await; }
+    if let Some(pool) = &nats_pool { 
+        if let Err(e) = pool.publish("ingest.v1.status", b"online").await {
+            warn!(error=?e, "failed to publish online status");
+        }
+    }
     let ingest_file = std::env::var("INGEST_FILE").ok();
-    if let Some(f) = ingest_file { if Path::new(&f).exists() { ingest_file_loop(&f, &mut nats_conn, &metrics, &engine).await?; return Ok(()); } }
+    if let Some(f) = ingest_file { if Path::new(&f).exists() { ingest_file_loop(&f, &mut nats_pool, &metrics, &engine).await?; return Ok(()); } }
     let run_once = std::env::var("SWARM_RUN_ONCE").ok().map(|v| v=="1" || v.eq_ignore_ascii_case("true")).unwrap_or(false);
-    synthetic_loop(&mut nats_conn, &metrics, run_once, &engine).await;
+    synthetic_loop(&mut nats_pool, &metrics, run_once, &engine).await;
     Ok(())
 }
 
 // Tracing handled by swarm-core
 
-async fn ingest_file_loop(path: &str, nats: &mut Option<async_nats::Client>, metrics: &Metrics, engine: &DetectionEngine) -> Result<()> {
+async fn ingest_file_loop(path: &str, nats: &mut Option<Arc<NatsPool>>, metrics: &Metrics, engine: &DetectionEngine) -> Result<()> {
     info!(target:"sensor-gateway", %path, "Starting file ingestion loop");
     let file = File::open(path).await.with_context(|| format!("open ingest file {path}"))?;
     let reader = BufReader::new(file);
@@ -82,7 +91,7 @@ async fn ingest_file_loop(path: &str, nats: &mut Option<async_nats::Client>, met
     Ok(())
 }
 
-async fn synthetic_loop(nats: &mut Option<async_nats::Client>, metrics: &Metrics, run_once: bool, engine: &DetectionEngine) {
+async fn synthetic_loop(nats: &mut Option<Arc<NatsPool>>, metrics: &Metrics, run_once: bool, engine: &DetectionEngine) {
     info!(target:"sensor-gateway", "Starting synthetic event generation loop");
     let mut i: u64 = 0;
     loop {
@@ -94,7 +103,8 @@ async fn synthetic_loop(nats: &mut Option<async_nats::Client>, metrics: &Metrics
     }
 }
 
-async fn process_line(line: &str, nats: &mut Option<async_nats::Client>, metrics: &Metrics, engine: &DetectionEngine) -> Result<()> {
+async fn process_line(line: &str, nats: &mut Option<Arc<NatsPool>>, metrics: &Metrics, engine: &DetectionEngine) -> Result<()> {
+    let start_e2e = std::time::Instant::now();
     let ts = SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis() as u64;
     let evt = RawEvent {
         id: format!("{}-{}", ts, fxhash::hash32(line.as_bytes())),
@@ -110,7 +120,11 @@ async fn process_line(line: &str, nats: &mut Option<async_nats::Client>, metrics
     let elapsed = start.elapsed().as_secs_f64() * 1000.0; // ms
     metrics.encode_latency_ms.record(elapsed, &[]);
     metrics.payload_bytes.record(buf.len() as u64, &[]);
-    if let Some(nc) = nats { publish_with_resilience(nc, &CircuitBreaker::new(3, std::time::Duration::from_secs(5)), "ingest.v1.raw", &buf).await; }
+    if let Some(pool) = nats { 
+        if let Err(e) = pool.publish("ingest.v1.raw", &buf).await {
+            warn!(error=?e, "failed to publish raw event");
+        }
+    }
     // Detection
     let detections = engine.scan(line);
     // Ground truth heuristic: lines containing token MALICIOUS are considered true threats
@@ -156,9 +170,11 @@ async fn process_line(line: &str, nats: &mut Option<async_nats::Client>, metrics
     if gt_positive && detections.is_empty() { fp_ratio_gauge.record( fp_ctr.as_any().type_id() == fp_ctr.as_any().type_id() /* noop */ as i32 as f64, &[]); }
     if gt_positive && !detections.is_empty() { detection_rate_gauge.record(1.0, &[]); }
     for det in detections {
-        if let Some(nc) = nats {
+        if let Some(pool) = nats {
             if let Ok(json) = serde_json::to_vec(&det) {
-                publish_with_resilience(nc, &CircuitBreaker::new(3, std::time::Duration::from_secs(5)), "threat.v1.alert.detected", &json).await;
+                if let Err(e) = pool.publish("threat.v1.alert.detected", &json).await {
+                    warn!(error=?e, "failed to publish detection alert");
+                }
                 if let Ok(path) = std::env::var("DETECTION_LOG_PATH") {
                     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
                         let _ = writeln!(f, "{}", String::from_utf8_lossy(&json));
@@ -167,21 +183,15 @@ async fn process_line(line: &str, nats: &mut Option<async_nats::Client>, metrics
             }
         }
     }
+    // Record E2E latency for performance tracking
+    let e2e_elapsed = start_e2e.elapsed().as_secs_f64() * 1000.0; // ms
+    let meter = opentelemetry::global::meter("sensor-gateway");
+    let e2e_histogram = meter.f64_histogram("swarm_ingest_e2e_latency_ms")
+        .with_description("End-to-end latency from ingest to detection publish")
+        .init();
+    e2e_histogram.record(e2e_elapsed, &[]);
     metrics.events_total.add(1, &[]);
     Ok(())
-}
-
-async fn publish_with_resilience(nc: &async_nats::Client, cb: &CircuitBreaker, subject: &str, data: &[u8]) {
-    if !cb.allow() { warn!(subject, "circuit open - dropping publish"); return; }
-    let attempt = retry_async(|| {
-        let subj = subject.to_string();
-        let payload = data.to_vec();
-        async move { nc.publish(subj.clone().into(), payload.clone().into()).await.map_err(|e| e) }
-    }, 3, std::time::Duration::from_millis(100)).await;
-    match attempt {
-        Ok(_) => cb.record_success(),
-        Err(e) => { cb.record_failure(); warn!(error=?e, subject, "publish failed after retries"); }
-    }
 }
 
 use notify::{Watcher, RecommendedWatcher, RecursiveMode, EventKind};
