@@ -397,3 +397,17 @@ Commit dự kiến: `feat(core): ml detection + federated learning + pbft consen
 **Implementer:** ShieldX Core Team
 **Status:** Ready for integration tests
 ---
+## 2025-10-01 (ARCHITECTURE GAP ALIGNMENT – CORE STUBS) by ShieldX
+
+### [02:15] 🧩 Bổ sung skeleton theo thiết kế 1.1
+- feat(core): thêm các module skeleton: `crypto_pqc.rs`, `config_signature.rs`, `evolutionary.rs`, `model_registry.rs`, `privacy.rs`
+- feat(core): hoàn thiện `false_positive_ratio()` với atomic counters nội bộ
+- chore(config): hook xác thực chữ ký cấu hình (placeholder) trong `load_config()`
+- docs: cập nhật nhật ký kiến trúc đồng bộ roadmap Phase 1 → Phase 2
+
+Deferred (Phase 2): Secure aggregation (DP + masking), Bloom filter gossip, PQC thực tế (Kyber/Dilithium lib), model artifact integrity (hash+sig), optimization loops thực thi định kỳ.
+
+Lợi ích: Hoá giải khoảng trống kiến trúc, chuẩn hóa điểm mở rộng bảo mật & ML, tạo nền tảng triển khai chức năng nâng cao mà không breaking API hiện tại.
+
+Commit: `feat(core): pqc+config-signature+evolutionary+model-registry+privacy skeleton & fp ratio`
+
