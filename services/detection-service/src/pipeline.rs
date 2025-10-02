@@ -1,13 +1,13 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use std::time::Instant;
-use tracing::{instrument, debug};
+use tracing::{instrument};
 use serde::{Serialize, Deserialize};
 use swarm_core::{detection_metrics, record_detection};
-
-use crate::signature_db::SignatureDb;
-use crate::anomaly::AnomalyDetector;
-#[cfg(feature = "onnx")] use crate::ml::OnnxModel;
+use crate::signature_db::{SignatureDb, SignatureMeta};
+use crate::anomaly::{AnomalyDetector, AnomalyScore};
+#[cfg(feature = "onnx") ] use crate::ml::OnnxModel;
+use itertools::Itertools;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawEvent {
@@ -19,21 +19,15 @@ pub struct RawEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineOutcome {
     pub event_id: String,
-    pub signature_match: Option<String>,
-    pub anomaly_score: f64,
+    pub signature_hits: Vec<String>,
+    pub anomaly: Option<AnomalyScore>,
     pub ml_confidence: Option<f32>,
     pub threat: bool,
     pub latency_ms: StageLatencies,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct StageLatencies {
-    pub ingestion_ms: f64,
-    pub signature_ms: f64,
-    pub anomaly_ms: f64,
-    pub ml_ms: f64,
-    pub total_ms: f64,
-}
+pub struct StageLatencies { pub ingestion_ms: f64, pub signature_ms: f64, pub anomaly_ms: f64, pub ml_ms: f64, pub total_ms: f64 }
 
 #[async_trait]
 trait Stage {
@@ -42,60 +36,64 @@ trait Stage {
 
 struct EventContext {
     raw: RawEvent,
-    normalized: Option<Normalized>,
-    signature_match: Option<String>,
-    anomaly_score: f64,
+    feats: Option<FeatureVector>,
+    signature_hits: Vec<SignatureMeta>,
+    anomaly_score: Option<AnomalyScore>,
     ml_confidence: Option<f32>,
     lat: StageLatencies,
 }
 
 #[derive(Debug, Clone)]
-struct Normalized {
-    id: String,
-    features: Vec<f32>,
+pub struct FeatureVector { pub id: String, pub values: Vec<f32> }
+
+fn entropy(bytes: &[u8]) -> f32 { if bytes.is_empty(){return 0.0;} let mut freq=[0usize;256]; for b in bytes { freq[*b as usize]+=1; } let len = bytes.len() as f32; let mut h=0.0; for f in freq.iter().copied() { if f==0 { continue; } let p = f as f32 / len; h -= p * p.ln(); } h }
+
+fn extract_features(raw: &RawEvent) -> FeatureVector {
+    let data = &raw.bytes;
+    let len = data.len() as f32;
+    let len_norm = (len.min(65535.0) / 65535.0) as f32;
+    let ent = entropy(data) / 8.0; // normalize approx
+    let printable = data.iter().filter(|b| b.is_ascii_graphic()).count() as f32 / (len.max(1.0));
+    let digits = data.iter().filter(|b| b.is_ascii_digit()).count() as f32 / (len.max(1.0));
+    let hex = data.iter().filter(|b| matches!(b, b'0'..=b'9'|b'a'..=b'f'|b'A'..=b'F')).count() as f32 / (len.max(1.0));
+    let crc = crc32fast::hash(data) as f32 / (u32::MAX as f32);
+    let base_feats = vec![len_norm, ent, printable, digits, hex, crc];
+    FeatureVector { id: raw.id.clone(), values: base_feats }
 }
 
-pub struct DetectionPipeline {
-    signature: SignatureDb,
-    anomaly: AnomalyDetector,
-    #[cfg(feature = "onnx")] model: OnnxModel,
-}
+pub struct DetectionPipeline { signature: SignatureDb, anomaly: AnomalyDetector, #[cfg(feature = "onnx")] model: OnnxModel }
 
 impl DetectionPipeline {
     pub async fn new() -> Result<Self> {
-        Ok(Self {
-            signature: SignatureDb::open(Default::default())?,
-            anomaly: AnomalyDetector::new(0.3, 0.05),
-            #[cfg(feature = "onnx")] model: OnnxModel::load_env()?,
-        })
+        Ok(Self { signature: SignatureDb::open(Default::default())?, anomaly: AnomalyDetector::new(3.5, 2.5, 257), #[cfg(feature = "onnx")] model: OnnxModel::load_env()? })
     }
 
     #[instrument(skip(self, ev))]
     pub async fn process(&self, ev: RawEvent) -> Result<PipelineOutcome> {
         let start = Instant::now();
-        let mut ctx = EventContext { raw: ev, normalized: None, signature_match: None, anomaly_score: 0.0, ml_confidence: None, lat: StageLatencies::default() };
+        let mut ctx = EventContext { raw: ev, feats: None, signature_hits: Vec::new(), anomaly_score: None, ml_confidence: None, lat: StageLatencies::default() };
 
-        // Stage 1 ingestion/normalize
+        // Stage 1 ingestion / feature extraction
         let s = Instant::now();
-        ctx.normalized = Some(self.normalize(&ctx.raw)?);
+        ctx.feats = Some(extract_features(&ctx.raw));
         ctx.lat.ingestion_ms = s.elapsed().as_secs_f64()*1000.0;
 
         // Stage 2 signature match
         let s = Instant::now();
-        if let Some(norm) = &ctx.normalized { ctx.signature_match = self.signature.match_event(norm)?; }
+        if let Some(f) = &ctx.feats { ctx.signature_hits = self.signature.match_bytes(&ctx.raw.bytes); }
         ctx.lat.signature_ms = s.elapsed().as_secs_f64()*1000.0;
-        if ctx.signature_match.is_some() { detection_metrics().signature_total.add(1, &[]); }
+        if !ctx.signature_hits.is_empty() { detection_metrics().signature_total.add(ctx.signature_hits.len() as u64, &[]); }
 
         // Stage 3 anomaly detection
         let s = Instant::now();
-        if let Some(norm) = &ctx.normalized { ctx.anomaly_score = self.anomaly.score(&norm.features); }
+        if let Some(f) = &ctx.feats { ctx.anomaly_score = Some(self.anomaly.score(&f.values)); }
         ctx.lat.anomaly_ms = s.elapsed().as_secs_f64()*1000.0;
-        if ctx.anomaly_score > self.anomaly.threshold() { detection_metrics().anomaly_total.add(1, &[]); }
+        if let Some(a) = &ctx.anomaly_score { if self.anomaly.is_anomaly(a) { detection_metrics().anomaly_total.add(1, &[]); } }
 
         // Stage 4 ml inference (optional)
         #[cfg(feature = "onnx")] {
             let s = Instant::now();
-            if let Some(norm) = &ctx.normalized { ctx.ml_confidence = self.model.infer(&norm.features)?; }
+            if let Some(f) = &ctx.feats { ctx.ml_confidence = self.model.infer(&f.values)?.map(|r| r.confidence); }
             ctx.lat.ml_ms = s.elapsed().as_secs_f64()*1000.0;
         }
 
@@ -103,26 +101,19 @@ impl DetectionPipeline {
         detection_metrics().alert_latency_ms.record(ctx.lat.total_ms, &[]);
         detection_metrics().e2e_latency_ms.record(ctx.lat.total_ms, &[]);
 
-        let threat = ctx.signature_match.is_some() || ctx.anomaly_score > self.anomaly.threshold() || ctx.ml_confidence.map(|c| c > 0.85).unwrap_or(false);
+        let anomaly_flag = ctx.anomaly_score.as_ref().map(|a| self.anomaly.is_anomaly(a)).unwrap_or(false);
+        let ml_flag = ctx.ml_confidence.map(|c| c > 0.85).unwrap_or(false);
+        let threat = !ctx.signature_hits.is_empty() || anomaly_flag || ml_flag;
         record_detection(false);
 
         Ok(PipelineOutcome {
             event_id: ctx.raw.id,
-            signature_match: ctx.signature_match,
-            anomaly_score: ctx.anomaly_score,
+            signature_hits: ctx.signature_hits.iter().map(|m| m.id.clone()).collect_vec(),
+            anomaly: ctx.anomaly_score,
             ml_confidence: ctx.ml_confidence,
             threat,
             latency_ms: ctx.lat,
         })
-    }
-
-    fn normalize(&self, ev: &RawEvent) -> Result<Normalized> {
-        // Placeholder simple feature extraction
-        let mut features = Vec::new();
-        let len = ev.bytes.len() as f32;
-        features.push(len.min(2048.0)/2048.0);
-        features.push((len % 17.0)/17.0);
-        Ok(Normalized { id: ev.id.clone(), features })
     }
 }
 

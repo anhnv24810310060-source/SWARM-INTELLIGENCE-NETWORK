@@ -20,6 +20,13 @@ thiserror = "1"
 sled = "0.34"
 # bloom filter
 bloom = "0.3"
+# pattern matching & hashing & mmap
+aho-corasick = "1"
+sha2 = "0.10"
+memmap2 = "0.9"
+arc-swap = "1"
+crc32fast = "1"
+itertools = "0.12"
 # optional onnx inference
 tract-core = { version = "0.21", optional = true }
 tract-onnx = { version = "0.21", optional = true }
