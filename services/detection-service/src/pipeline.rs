@@ -4,6 +4,8 @@ use std::time::Instant;
 use tracing::{instrument};
 use serde::{Serialize, Deserialize};
 use swarm_core::{detection_metrics, record_detection};
+use opentelemetry::metrics::{Histogram, Meter};
+use once_cell::sync::Lazy;
 use crate::signature_db::{SignatureDb, SignatureMeta};
 use crate::anomaly::{AnomalyDetector, AnomalyScore};
 #[cfg(feature = "onnx") ] use crate::ml::OnnxModel;
@@ -63,9 +65,27 @@ fn extract_features(raw: &RawEvent) -> FeatureVector {
 
 pub struct DetectionPipeline { signature: SignatureDb, anomaly: AnomalyDetector, #[cfg(feature = "onnx")] model: OnnxModel }
 
+static STAGE_METER: Lazy<Meter> = Lazy::new(|| opentelemetry::global::meter("swarm_detection"));
+static STAGE_LAT_HISTO: Lazy<Histogram<f64>> = Lazy::new(|| STAGE_METER.f64_histogram("detection_stage_latency_ms")
+    .with_description("Latency per detection pipeline stage (ms)")
+    .init());
+
 impl DetectionPipeline {
     pub async fn new() -> Result<Self> {
         Ok(Self { signature: SignatureDb::open(Default::default())?, anomaly: AnomalyDetector::new(3.5, 2.5, 257), #[cfg(feature = "onnx")] model: OnnxModel::load_env()? })
+    }
+
+    pub fn anomaly_debug_snapshot(&self) -> impl Fn() -> AnomalyDebug + Send + Sync + 'static {
+        use std::sync::Mutex;
+        let mut_det = Mutex::new(self.anomaly.clone());
+        move || {
+            let mut a = mut_det.lock().unwrap();
+            AnomalyDebug {
+                hard_threshold: a.hard_threshold(),
+                current_quantile: a.current_quantile(),
+                adjustments: a.adjust_history().to_vec(),
+            }
+        }
     }
 
     #[instrument(skip(self, ev))]
@@ -73,28 +93,32 @@ impl DetectionPipeline {
         let start = Instant::now();
         let mut ctx = EventContext { raw: ev, feats: None, signature_hits: Vec::new(), anomaly_score: None, ml_confidence: None, lat: StageLatencies::default() };
 
-        // Stage 1 ingestion / feature extraction
+    // Stage 1 ingestion / feature extraction
         let s = Instant::now();
         ctx.feats = Some(extract_features(&ctx.raw));
         ctx.lat.ingestion_ms = s.elapsed().as_secs_f64()*1000.0;
+    STAGE_LAT_HISTO.record(ctx.lat.ingestion_ms, &[opentelemetry::KeyValue::new("stage", "ingest")]);
 
         // Stage 2 signature match
         let s = Instant::now();
-        if let Some(f) = &ctx.feats { ctx.signature_hits = self.signature.match_bytes(&ctx.raw.bytes); }
+    if let Some(_f) = &ctx.feats { ctx.signature_hits = self.signature.match_bytes(&ctx.raw.bytes); }
         ctx.lat.signature_ms = s.elapsed().as_secs_f64()*1000.0;
         if !ctx.signature_hits.is_empty() { detection_metrics().signature_total.add(ctx.signature_hits.len() as u64, &[]); }
+    STAGE_LAT_HISTO.record(ctx.lat.signature_ms, &[opentelemetry::KeyValue::new("stage", "signature")]);
 
         // Stage 3 anomaly detection
         let s = Instant::now();
-        if let Some(f) = &ctx.feats { ctx.anomaly_score = Some(self.anomaly.score(&f.values)); }
+    if let Some(f) = &ctx.feats { ctx.anomaly_score = Some(self.anomaly.score(&f.values)); }
         ctx.lat.anomaly_ms = s.elapsed().as_secs_f64()*1000.0;
         if let Some(a) = &ctx.anomaly_score { if self.anomaly.is_anomaly(a) { detection_metrics().anomaly_total.add(1, &[]); } }
+    STAGE_LAT_HISTO.record(ctx.lat.anomaly_ms, &[opentelemetry::KeyValue::new("stage", "anomaly")]);
 
         // Stage 4 ml inference (optional)
         #[cfg(feature = "onnx")] {
             let s = Instant::now();
-            if let Some(f) = &ctx.feats { ctx.ml_confidence = self.model.infer(&f.values)?.map(|r| r.confidence); }
+            if let Some(f) = &ctx.feats { ctx.ml_confidence = self.model.infer_batched(&f.values).await?.map(|r| r.confidence); }
             ctx.lat.ml_ms = s.elapsed().as_secs_f64()*1000.0;
+            STAGE_LAT_HISTO.record(ctx.lat.ml_ms, &[opentelemetry::KeyValue::new("stage", "ml")]);
         }
 
         ctx.lat.total_ms = start.elapsed().as_secs_f64()*1000.0;
@@ -116,6 +140,9 @@ impl DetectionPipeline {
         })
     }
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AnomalyDebug { pub hard_threshold: f64, pub current_quantile: Option<f64>, pub adjustments: Vec<(u64,f64)> }
 
 #[cfg(test)]
 mod tests {

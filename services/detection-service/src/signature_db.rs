@@ -11,6 +11,9 @@ use std::sync::Arc;
 use serde::{Serialize, Deserialize};
 use memmap2::Mmap;
 use std::fs::File;
+use sha2::Sha256;
+use sha2::Digest as _; // for finalize
+use serde_yaml;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignatureMeta {
@@ -27,6 +30,7 @@ pub struct SignatureDb {
     bloom: BloomFilter,
     automaton: ArcSwap<Option<Arc<AhoCorasick>>>,
     patterns: ArcSwap<Vec<SignatureMeta>>,
+    last_checksum: ArcSwap<Option<String>>,
 }
 
 #[derive(Default)]
@@ -43,7 +47,7 @@ impl SignatureDb {
         let path = opts.path.unwrap_or_else(|| PathBuf::from("/tmp/detection-signatures"));
         let db = sled::open(path)?;
         let bloom = BloomFilter::with_rate(opts.bloom_fp_rate, opts.bloom_items as u32);
-        Ok(Self { db, bloom, automaton: ArcSwap::from_pointee(None), patterns: ArcSwap::from_pointee(Vec::new()) })
+        Ok(Self { db, bloom, automaton: ArcSwap::from_pointee(None), patterns: ArcSwap::from_pointee(Vec::new()), last_checksum: ArcSwap::from_pointee(None) })
     }
 
     pub fn load_rules_file(&self, file: &str) -> Result<()> {
@@ -51,8 +55,16 @@ impl SignatureDb {
         if !path.exists() { return Err(anyhow!("rules file missing")); }
         let f = File::open(&path)?;
         let mmap = unsafe { Mmap::map(&f)? };
-        // Expect JSON array of SignatureMeta
-        let metas: Vec<SignatureMeta> = serde_json::from_slice(&mmap)?;
+        // Detect format by extension
+        let metas: Vec<SignatureMeta> = if file.ends_with(".yaml") || file.ends_with(".yml") {
+            serde_yaml::from_slice(&mmap)?
+        } else { serde_json::from_slice(&mmap)? };
+        // checksum
+        let mut hasher = Sha256::new();
+        hasher.update(&mmap);
+        let sum = format!("{:x}", hasher.finalize());
+        if let Some(prev) = self.last_checksum.load().as_ref() { if prev == &sum { return Ok(()); } }
+        self.last_checksum.store(Arc::new(Some(sum)));
         self.rebuild(metas)?;
         Ok(())
     }
