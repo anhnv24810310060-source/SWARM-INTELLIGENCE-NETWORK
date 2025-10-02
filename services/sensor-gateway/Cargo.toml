@@ -1,17 +1,6 @@
 [package]
 name = "sensor-gateway"
-ve[dev-dependencies]
-criterion = { version = "0.5", features=["async_tokio"] }
-tokio = { version = "1", features = ["full"] }
-pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
-
-[[bench]]
-name = "detection_overhead"
-harness = false
-
-[[bench]]
-name = "e2e_latency"
-harness = false "0.1.0"
+version = "0.1.0"
 edition = "2021"
 
 [dependencies]
@@ -25,13 +14,13 @@ swarm-core = { path = "../../libs/rust/core" }
 async-nats = "0.36"
 swarm-proto = { path = "../../libs/rust/proto" }
 prost = "0.12"
-opentelemetry = { version = "0.22", features=["metrics"] }
-opentelemetry-otlp = "0.15"
-tracing-opentelemetry = "0.24"
+opentelemetry = { version = "0.29", features=["metrics"] }
+opentelemetry-otlp = "0.29"
+tracing-opentelemetry = "0.26"
 fxhash = "0.2"
 hostname = "0.3"
 swarm-resilience = { path = "../../libs/rust/resilience" }
-notify = "6"
+notify = { version = "6" }
 tokio-stream = "0.1"
 regex = "1"
 parking_lot = "0.12"
@@ -48,7 +37,12 @@ integration = []
 [dev-dependencies]
 criterion = { version = "0.5", features=["async_tokio"] }
 tokio = { version = "1", features=["full"] }
+pprof = { version = "0.13", features = ["flamegraph", "criterion"] }
 
 [[bench]]
 name = "detection_overhead"
+harness = false
+
+[[bench]]
+name = "e2e_latency"
 harness = false

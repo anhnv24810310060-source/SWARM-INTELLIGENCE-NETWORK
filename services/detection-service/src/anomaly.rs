@@ -1,4 +1,7 @@
 use std::collections::VecDeque;
+use once_cell::sync::Lazy;
+use std::sync::atomic::{AtomicU64, Ordering};
+use opentelemetry::metrics::Meter;
 
 #[derive(Debug, Clone)]
 pub struct AnomalyDetector {
@@ -26,7 +29,10 @@ pub struct AnomalyScore { pub composite: f64, pub z_scores: Vec<f64>, pub mad_sc
 
 impl AnomalyDetector {
     pub fn new(hard_threshold: f64, soft_threshold: f64, window: usize) -> Self { 
-        Self { features_stats: Vec::new(), window, med_buffers: Vec::new(), hard_threshold, soft_threshold, adaptive: true, target_quantile: 0.995, quantile_est: P2Quantile::new(0.995), adjust_history: Vec::with_capacity(64), seen:0, min_hard: soft_threshold.max(1.5), max_hard: hard_threshold*4.0 }
+        Lazy::force(&THRESHOLD_GAUGE_INIT);
+        let detector = Self { features_stats: Vec::new(), window, med_buffers: Vec::new(), hard_threshold, soft_threshold, adaptive: true, target_quantile: 0.995, quantile_est: P2Quantile::new(0.995), adjust_history: Vec::with_capacity(64), seen:0, min_hard: soft_threshold.max(1.5), max_hard: hard_threshold*4.0 };
+        HARD_THRESHOLD_ATOMIC.store((hard_threshold*1_000_000.0) as u64, Ordering::Relaxed);
+        detector
     }
 
     pub fn score(&mut self, features: &[f32]) -> AnomalyScore {
@@ -77,10 +83,23 @@ impl AnomalyDetector {
                 self.hard_threshold = new_hard;
                 self.adjust_history.push((self.seen, new_hard));
                 if self.adjust_history.len()>256 { self.adjust_history.remove(0); }
+                HARD_THRESHOLD_ATOMIC.store((self.hard_threshold*1_000_000.0) as u64, Ordering::Relaxed);
             }
         }
     }
 }
+
+// Metrics for anomaly threshold gauge
+static ANOMALY_METER: Lazy<Meter> = Lazy::new(|| opentelemetry::global::meter("swarm_anomaly"));
+static HARD_THRESHOLD_ATOMIC: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+static THRESHOLD_GAUGE_INIT: Lazy<()> = Lazy::new(|| {
+    let gauge = ANOMALY_METER.f64_observable_gauge("swarm_anomaly_hard_threshold").with_description("Current adaptive hard threshold").init();
+    let atom = HARD_THRESHOLD_ATOMIC.clone();
+    ANOMALY_METER.register_callback(&[gauge.as_any()], move |obs| {
+        let v = atom.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+        obs.observe_f64(&gauge, v, &[]);
+    }).ok();
+});
 
 // P² quantile estimator
 #[derive(Debug, Clone)]

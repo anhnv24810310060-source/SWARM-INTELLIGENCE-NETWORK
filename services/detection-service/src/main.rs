@@ -10,6 +10,7 @@ use tokio::signal;
 mod pipeline;
 mod signature_db;
 mod anomaly;
+mod ingest;
 #[cfg(feature = "onnx")] mod ml;
 
 #[tokio::main]
@@ -62,8 +63,33 @@ async fn main() -> Result<()> {
     mark_ready();
     info!("service ready");
 
-    // In a real system we would consume events from a queue / socket.
-    // Placeholder loop omitted for brevity.
+    // Ingest subsystem: bounded channel + token bucket rate limiter
+    let ingest_cap: usize = std::env::var("SWARM__DETECTION__INGEST_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(2048);
+    let ingest_rps: u64 = std::env::var("SWARM__DETECTION__INGEST_RPS").ok().and_then(|v| v.parse().ok()).unwrap_or(10_000);
+    let max_event: usize = std::env::var("SWARM__DETECTION__INGEST_MAX_EVENT").ok().and_then(|v| v.parse().ok()).unwrap_or(128*1024);
+    let (ing_handle, mut rx) = ingest::start_ingest(ingest_cap, ingest_rps, max_event);
+
+    // Example synthetic feeder (would be replaced by real socket/kafka, etc.)
+    let pipe_clone = pipe.clone();
+    tokio::spawn(async move {
+        while let Some(raw) = rx.recv().await {
+            ingest::on_dequeue();
+            let p = pipe_clone.clone();
+            tokio::spawn(async move { let _ = p.process(raw).await; });
+        }
+    });
+
+    // Synthetic generator for demonstration (can be disabled via env flag)
+    let ing_clone = ing_handle.clone();
+    tokio::spawn(async move {
+        let mut i: u64 = 0;
+        loop {
+            i+=1;
+            let ev = pipeline::RawEvent { id: format!("synthetic-{i}"), bytes: format!("hello-{i}").into_bytes(), ts: i as i64 };
+            let _ = ing_clone.try_push(ev);
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
 
     signal::ctrl_c().await?;
     info!("shutdown");

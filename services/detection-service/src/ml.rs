@@ -7,6 +7,13 @@ use std::sync::Arc;
 #[cfg(feature = "onnx")] use tract_onnx::prelude::*;
 #[cfg(feature = "onnx")] use tokio::sync::{mpsc, oneshot};
 #[cfg(feature = "onnx")] use tokio::task::JoinHandle;
+#[cfg(feature = "onnx")] use swarm_core::CircuitBreaker;
+use once_cell::sync::Lazy;
+use opentelemetry::metrics::{Meter, Counter};
+static ML_METER: Lazy<Meter> = Lazy::new(|| opentelemetry::global::meter("swarm_detection_ml"));
+static ML_INFER_TIMEOUT_TOTAL: Lazy<Counter<u64>> = Lazy::new(|| ML_METER.u64_counter("swarm_detection_ml_infer_timeout_total").with_description("Total ML inference timeouts").init());
+static ML_INFER_ERROR_TOTAL: Lazy<Counter<u64>> = Lazy::new(|| ML_METER.u64_counter("swarm_detection_ml_infer_error_total").with_description("Total ML inference errors (non-timeout)").init());
+static ML_INFER_CIRCUIT_OPEN_TOTAL: Lazy<Counter<u64>> = Lazy::new(|| ML_METER.u64_counter("swarm_detection_ml_circuit_open_total").with_description("Total inference attempts blocked by open circuit").init());
 
 #[derive(Clone, Debug)]
 pub struct MLResult {
@@ -29,6 +36,7 @@ pub struct OnnxModel {
     warm: Arc<RwLock<bool>>,
     timeout_ms: u64,
     #[cfg(feature = "onnx")] batcher: Option<InferenceBatcher>,
+    #[cfg(feature = "onnx")] breaker: Arc<CircuitBreaker>,
 }
 
 #[cfg(feature = "onnx")]
@@ -170,7 +178,11 @@ impl OnnxModel {
                 .and_then(|f| f.shape.as_concrete().map(|s| s.iter().product::<usize>()))
                 .unwrap_or(256);
             let inner = Arc::new(ModelInner { model, mtime, input_dim });
-            let this = Self { path: path.to_path_buf(), inner: ArcSwap::from(inner), warm: Arc::new(RwLock::new(false)), timeout_ms, batcher: None };
+            let breaker = CircuitBreaker::new(
+                std::env::var("SWARM__DETECTION__ML__CB_FAIL_THRESHOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(5),
+                Duration::from_millis(std::env::var("SWARM__DETECTION__ML__CB_OPEN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(5_000)),
+                std::env::var("SWARM__DETECTION__ML__CB_HALF_SUCCESS").ok().and_then(|v| v.parse().ok()).unwrap_or(2));
+            let this = Self { path: path.to_path_buf(), inner: ArcSwap::from(inner), warm: Arc::new(RwLock::new(false)), timeout_ms, batcher: None, breaker };
             this.warmup()?;
             Ok(this)
         }
@@ -232,23 +244,41 @@ impl OnnxModel {
         #[cfg(feature = "onnx")] {
             use std::time::Duration; use tokio::runtime::Handle;
             if feats.len() != self.input_dim() { return Ok(None); }
-            let inner = self.inner.load();
-            let start = Instant::now();
-            // blocking run (tract not async). Consider spawn_blocking for heavy.
-            let output = inner.model.run(tvec!(Tensor::from_shape(&[1, feats.len() as i64], feats)?))?;
-            let elapsed = start.elapsed().as_millis() as u64;
-            if elapsed > self.timeout_ms { return Ok(None); }
-            let tensor = &output[0];
-            let slice: &[f32] = tensor.to_array_view::<f32>()?.iter().copied().collect::<Vec<_>>().leak();
-            let mut probs = slice.to_vec();
-            softmax(&mut probs);
-            if let Some((idx, conf)) = probs.iter().enumerate().max_by(|a,b| a.1.partial_cmp(b.1).unwrap()) { 
-                let mut topk: Vec<(usize,f32)> = probs.iter().enumerate().collect();
-                topk.sort_by(|a,b| b.1.partial_cmp(a.1).unwrap());
-                topk.truncate(5);
-                return Ok(Some(MLResult { class_id: idx, confidence: *conf, topk }));
+            let timeout = Duration::from_millis(self.timeout_ms);
+            let breaker = &self.breaker;
+            let res = breaker.exec(|| async {
+                let inner = self.inner.load();
+                let fut = tokio::time::timeout(timeout, async {
+                    inner.model.run(tvec!(Tensor::from_shape(&[1, feats.len() as i64], feats)?))
+                }).await;
+                match fut {
+                    Err(_) => Err(anyhow!("timeout")),
+                    Ok(Err(e)) => Err(anyhow!("onnx error: {e}")),
+                    Ok(Ok(o)) => Ok(o)
+                }
+            }).await;
+            match res {
+                Ok(output) => {
+                    let tensor = &output[0];
+                    let slice: &[f32] = tensor.to_array_view::<f32>()?.iter().copied().collect::<Vec<_>>().leak();
+                    let mut probs = slice.to_vec();
+                    softmax(&mut probs);
+                    if let Some((idx, conf)) = probs.iter().enumerate().max_by(|a,b| a.1.partial_cmp(b.1).unwrap()) { 
+                        let mut topk: Vec<(usize,f32)> = probs.iter().enumerate().collect();
+                        topk.sort_by(|a,b| b.1.partial_cmp(a.1).unwrap());
+                        topk.truncate(5);
+                        return Ok(Some(MLResult { class_id: idx, confidence: *conf, topk }));
+                    }
+                    Ok(None)
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("timeout") { ML_INFER_TIMEOUT_TOTAL.add(1,&[]); }
+                    else if msg.contains("circuit open") { ML_INFER_CIRCUIT_OPEN_TOTAL.add(1,&[]); }
+                    else { ML_INFER_ERROR_TOTAL.add(1,&[]); }
+                    Ok(None)
+                }
             }
-            return Ok(None);
         }
         #[cfg(not(feature = "onnx"))]
         { Ok(None) }

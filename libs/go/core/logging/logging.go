@@ -1,5 +1,4 @@
 package logging
-package logging
 
 import (
 	"log/slog"

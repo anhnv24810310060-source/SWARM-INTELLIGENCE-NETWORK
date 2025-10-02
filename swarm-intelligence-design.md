@@ -1,4 +1,50 @@
+
+
+
 # SWARM INTELLIGENCE NETWORK - COMPREHENSIVE SYSTEM DESIGN
+
+
+TIER 0 – Core Execution (Bắt buộc trước)
+Pipeline Detection Base (Ingest + Feature Extraction + Signature + Anomaly + ML Inference adapter)
+Config & Dynamic Reload (file + env + signature verify)
+Observability Core (metrics, tracing, structured logging, health/status endpoints)
+Security Baseline: mTLS, Ed25519 config/rules verify, model hash verify
+Resilience Runtime: retry + circuit breaker + timeouts + backpressure (event size / rate)
+Signature Engine (Aho-Corasick + Bloom + checksum & hot-reload)
+Anomaly Engine (Welford + MAD + adaptive thresholds)
+Model Manager (ONNX loader + hot-reload + batching + timeout fallback)
+TIER 1 – Critical Distributed Intelligence
+PBFT Consensus (extend: view change, persistence, quorum metrics)
+Federated Learning Coordinator (FedAvg → FedProx → Scaffold roadmap)
+Gossip Protocol (membership + partial anti-entropy)
+Node Identity & Attestation (TPM/HSM hook + node trust score)
+Secure Update Channel (signed model & signature bundles distribution)
+TIER 2 – Operational Robustness
+High Availability Messaging (NATS cluster / JetStream durability)
+Persistence Layer (RocksDB for signatures & anomaly baselines)
+Adaptive Resource Scaling (CPU/memory pressure → degrade path)
+Alerting & SLO Enforcement (Prometheus rules + error budgets)
+Audit & Forensics Logging (immutable append channel)
+Structured Failure Injection / Chaos (fault scenarios library)
+TIER 3 – Advanced Intelligence & Optimization
+Evolutionary Rule Engine (genetic refinement of signatures)
+Active Learning Loop (human feedback → model delta queue)
+Graph-Based Threat Correlation (entity graph + temporal links)
+Streaming QUIC Telemetry Channels (low-latency swarm sharing)
+Privacy Layer (DP noise injection for federated stats)
+Trust/Reputation Scoring (weighted consensus & FL participation)
+TIER 4 – Strategic & Differentiators
+GNN + Transformer Hybrid Models (topology + content fusion)
+Secure Aggregation (masking gradients / homomorphic prototype)
+Swarm Optimization (PSO/ACO for routing & load)
+Predictive Preemption (pre-attack staging heuristics)
+Autonomous Policy Mutation (self-tuning blocking rules)
+TIER 5 – Operational Excellence & Governance
+Full SBOM + Supply Chain Attestation (cosign/SLSA)
+Compliance Framework (logging classification + retention policy)
+Multi-Tenant Isolation (namespace quotas, per-tenant metrics)
+Cost Telemetry (per feature unit economics)
+Runbooks & Automated Remediation Playbooks
 
 ## EXECUTIVE SUMMARY
 

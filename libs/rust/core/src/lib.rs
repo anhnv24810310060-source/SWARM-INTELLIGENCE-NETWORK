@@ -16,9 +16,11 @@ use prometheus::{Encoder, TextEncoder};
 use std::net::SocketAddr;
 use serde::Deserialize;
 use opentelemetry::metrics::{Counter, Histogram, Meter, Unit};
+use tokio::sync::broadcast;
 use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
 static OTEL_INIT: OnceCell<()> = OnceCell::new();
 static CONFIG_CACHE: OnceCell<RwLock<CachedConfig>> = OnceCell::new();
+static CONFIG_BROADCAST: OnceCell<broadcast::Sender<DynamicConfig>> = OnceCell::new();
 static PROM_INIT: OnceCell<()> = OnceCell::new();
 static EXPORTER: Lazy<RwLock<Option<PrometheusExporter>>> = Lazy::new(|| RwLock::new(None));
 
@@ -30,6 +32,9 @@ pub struct DetectionMetrics {
     pub false_positive_total: Counter<u64>,
     pub alert_latency_ms: Histogram<f64>,
     pub e2e_latency_ms: Histogram<f64>,
+    pub config_reload_total: Counter<u64>,
+    pub config_reload_failed_total: Counter<u64>,
+    pub config_broadcast_total: Counter<u64>,
 }
 
 static DETECTION_METER: Lazy<Meter> = Lazy::new(|| opentelemetry::global::meter("swarm_detection"));
@@ -59,6 +64,15 @@ static DETECTION_METRICS: Lazy<DetectionMetrics> = Lazy::new(|| {
         e2e_latency_ms: DETECTION_METER.f64_histogram("swarm_ingest_e2e_latency_ms")
             .with_description("End-to-end ingest->detect->publish latency (ms)")
             .with_unit(Unit::new("ms"))
+            .init(),
+        config_reload_total: DETECTION_METER.u64_counter("swarm_config_reload_total")
+            .with_description("Successful dynamic config reloads")
+            .init(),
+        config_reload_failed_total: DETECTION_METER.u64_counter("swarm_config_reload_failed_total")
+            .with_description("Failed dynamic config reload attempts")
+            .init(),
+        config_broadcast_total: DETECTION_METER.u64_counter("swarm_config_broadcast_total")
+            .with_description("Config broadcasts published to subscribers")
             .init(),
     }
 });
@@ -169,13 +183,56 @@ pub async fn start_health_server(port: u16) -> Result<()> {
         }))
         .route("/metrics", get(metrics_handler));
     let addr = SocketAddr::from(([0,0,0,0], port));
-    tracing::info!(?addr, "Health server listening");
+    // TLS env: SWARM_TLS_CERT, SWARM_TLS_KEY, optional SWARM_TLS_CA for mTLS
+    let cert_path = std::env::var("SWARM_TLS_CERT").ok();
+    let key_path = std::env::var("SWARM_TLS_KEY").ok();
+    let ca_path = std::env::var("SWARM_TLS_CA").ok();
+    let use_tls = cert_path.is_some() && key_path.is_some();
+    tracing::info!(?addr, use_tls, "Health server listening");
+    let make_svc = app.into_make_service();
     tokio::spawn(async move {
-        if let Err(e) = axum::Server::bind(&addr).serve(app.into_make_service()).await {
-            tracing::error!(error=?e, "Health server failed");
-        }
+        if use_tls {
+            if let Err(e) = tls_serve(addr, cert_path.unwrap(), key_path.unwrap(), ca_path, make_svc).await { tracing::error!(error=?e, "TLS health server failed"); }
+        } else if let Err(e) = axum::Server::bind(&addr).serve(make_svc).await { tracing::error!(error=?e, "Health server failed"); }
     });
     Ok(())
+}
+
+async fn tls_serve<S>(addr: SocketAddr, cert: String, key: String, ca: Option<String>, make_svc: S) -> Result<()>
+where S: axum::handler::Handler<()> + Clone + Send + 'static, S::Future: Send {
+    use tokio_rustls::rustls::{pki_types::{CertificateDer, PrivateKeyDer}, ServerConfig, ServerConnectionVerifier, RootCertStore, AllowAnyAuthenticatedClient};
+    use tokio_rustls::TlsAcceptor;
+    use tokio::net::TcpListener;
+    // Load certs
+    let mut cert_file = std::fs::File::open(cert)?; let mut cert_buf = Vec::new(); std::io::Read::read_to_end(&mut cert_file, &mut cert_buf)?;
+    let mut key_file = std::fs::File::open(key)?; let mut key_buf = Vec::new(); std::io::Read::read_to_end(&mut key_file, &mut key_buf)?;
+    let mut certs = Vec::new();
+    for item in rustls_pemfile::certs(&mut &cert_buf[..]) { if let Ok(c) = item { certs.push(CertificateDer::from(c)); } }
+    let key = {
+        let mut keys = rustls_pemfile::pkcs8_private_keys(&mut &key_buf[..]);
+        let k = keys.next().ok_or_else(|| anyhow::anyhow!("no pkcs8 key"))??;
+        PrivateKeyDer::from(k)
+    };
+    let mut cfg = ServerConfig::builder().with_no_client_auth().with_single_cert(certs, key)?;
+    if let Some(ca_path) = ca {
+        let mut ca_file = std::fs::File::open(ca_path)?; let mut ca_buf = Vec::new(); std::io::Read::read_to_end(&mut ca_file, &mut ca_buf)?;
+        let mut store = RootCertStore::empty();
+        for item in rustls_pemfile::certs(&mut &ca_buf[..]) { if let Ok(c) = item { store.add(CertificateDer::from(c)).ok(); } }
+        cfg = ServerConfig::builder().with_client_cert_verifier(Arc::new(AllowAnyAuthenticatedClient::new(store))).with_single_cert(cfg.cert_resolver().certs().to_vec(), cfg.cert_resolver().certs()[0].clone_key())?;
+    }
+    let listener = TcpListener::bind(addr).await?;
+    let acceptor = TlsAcceptor::from(Arc::new(cfg));
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let acceptor = acceptor.clone();
+        let svc = make_svc.clone();
+        tokio::spawn(async move {
+            match acceptor.accept(stream).await {
+                Ok(tls_stream) => { let _ = hyper::Server::builder(hyper::server::accept::from_stream(tokio_stream::once(async { Ok::<_, std::io::Error>(tls_stream) }))).serve(svc).await; }
+                Err(e) => tracing::warn!(error=?e, ?peer, "TLS accept failed"),
+            }
+        });
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -214,14 +271,16 @@ pub async fn load_config(service: &str) -> Result<DynamicConfig> {
     builder = builder.add_source(config::Environment::with_prefix("SWARM").separator("__"));
     let cfg = builder.build()?;
     let dyn_cfg: DynamicConfig = cfg.try_deserialize()?;
-    // If signature present, attempt verification (best-effort for now)
+    let enforce = std::env::var("SWARM_CONFIG_VERIFY").ok().map(|v| v=="1"|| v.eq_ignore_ascii_case("true")).unwrap_or(false);
     if let (Some(sig), Some(file)) = (&dyn_cfg.config_signature, &file_path) {
         if let Ok(raw) = std::fs::read_to_string(file) {
-            if !crate::config_signature::verify_config_signature(&raw, sig) {
-                tracing::warn!(?file, "Config signature verification failed");
+            let ok = crate::config_signature::verify_config_signature(&raw, sig);
+            if !ok { 
+                if enforce { return Err(anyhow::anyhow!("config signature invalid")); }
+                tracing::warn!(?file, "Config signature verification failed (not enforced)");
             }
         }
-    }
+    } else if enforce { return Err(anyhow::anyhow!("config signature enforcement enabled but signature missing")); }
     let ttl_secs: u64 = std::env::var("SWARM_CONFIG_TTL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
     let cached = CachedConfig { cfg: dyn_cfg.clone(), fetched_at: Instant::now(), ttl: Duration::from_secs(ttl_secs), file: file_path};
     let lock = CONFIG_CACHE.get_or_init(|| RwLock::new(cached.clone()));
@@ -229,6 +288,7 @@ pub async fn load_config(service: &str) -> Result<DynamicConfig> {
         let mut w = lock.write();
         *w = cached;
     }
+    broadcast_config(&dyn_cfg);
     if let Some(f) = lock.read().file.clone() { spawn_file_watcher(f); }
     Ok(dyn_cfg)
 }
@@ -254,10 +314,29 @@ async fn refresh_from_file(path: &PathBuf) -> Result<()> {
     if let Some(lock) = CONFIG_CACHE.get() {
         if let Ok(text) = tokio::fs::read_to_string(path).await {
             let builder = config::Config::builder().add_source(config::File::from_str(&text, config::FileFormat::Yaml));
-            if let Ok(cfg) = builder.build() { if let Ok(new_cfg) = cfg.try_deserialize::<DynamicConfig>() { let mut w = lock.write(); w.cfg = new_cfg; w.fetched_at = Instant::now(); } }
+            if let Ok(cfg) = builder.build() {
+                match cfg.try_deserialize::<DynamicConfig>() {
+                    Ok(new_cfg) => { let mut w = lock.write(); w.cfg = new_cfg.clone(); w.fetched_at = Instant::now(); detection_metrics().config_reload_total.add(1,&[]); broadcast_config(&new_cfg); },
+                    Err(_) => { detection_metrics().config_reload_failed_total.add(1,&[]); }
+                }
+            } else { detection_metrics().config_reload_failed_total.add(1,&[]); }
         }
     }
     Ok(())
+}
+
+fn broadcast_config(cfg: &DynamicConfig) {
+    let tx = CONFIG_BROADCAST.get_or_init(|| {
+        let cap = std::env::var("SWARM_CONFIG_BROADCAST_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
+        let (tx, _rx) = broadcast::channel::<DynamicConfig>(cap);
+        tx
+    });
+    if tx.send(cfg.clone()).is_ok() { detection_metrics().config_broadcast_total.add(1,&[]); }
+}
+
+/// Subscribe to dynamic config updates (hot stream). Returns None if broadcast not yet initialized.
+pub fn subscribe_config() -> Option<broadcast::Receiver<DynamicConfig>> {
+    CONFIG_BROADCAST.get().map(|tx| tx.subscribe())
 }
 
 pub async fn force_reload(service: &str) -> Result<DynamicConfig> { load_config(service).await }
@@ -324,5 +403,10 @@ mod tests {
         let after = false_positive_ratio();
         assert!(after >= before);
         assert!(after <= 1.0);
+    }
+
+    #[tokio::test]
+    async fn observability_init() {
+        let _ = init_observability("test-svc", false).await; // Should not panic
     }
 }

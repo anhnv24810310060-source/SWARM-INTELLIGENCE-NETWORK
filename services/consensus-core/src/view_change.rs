@@ -47,6 +47,9 @@ impl PbftService {
                     let elapsed_ms = last_change.elapsed().as_secs_f64() * 1000.0;
                     vc_counter.add(1, &[]);
                     vc_hist.record(elapsed_ms, &[]);
+                    // treat timeout-induced leadership change as a fault event for now
+                    let faults = opentelemetry::global::meter("consensus-core").u64_counter("swarm_consensus_faults_total").with_description("Consensus fault events (timeouts, suspected leader failure)").init();
+                    faults.add(1, &[]);
                     last_change = Instant::now();
                     info!(height=st.height, round=st.round, leader=%st.leader, interval_ms=elapsed_ms, "view_change_timeout_triggered");
                 } else {
