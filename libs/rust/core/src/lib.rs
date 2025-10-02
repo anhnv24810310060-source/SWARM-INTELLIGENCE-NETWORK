@@ -297,7 +297,7 @@ mod metrics_ext; // extended metrics groups
 
 pub use ml_detection::{MLDetectionPipeline, ThreatEvent, DetectionResult, ThreatLevel};
 pub use federated_learning::{FederatedLearningCoordinator, ModelGradient, GlobalModel, AggregationMethod};
-pub use consensus::{PBFTConsensus, ConsensusMessage, NodeId};
+pub use consensus::{PBFTConsensus, PBFTMessage as ConsensusMessage, NodeId};
 pub use autoscaling::{AutoScaler, ResourceMetrics, ScalingDecision, ScalingThresholds};
 pub use gossip::{GossipEngine, GossipMessage, GossipKind, GossipId};
 pub use transport_quic::{QuicTransport, QuicConfig, QuicConnectionHandle};
