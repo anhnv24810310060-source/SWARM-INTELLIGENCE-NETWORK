@@ -88,9 +88,17 @@ impl DetectionPipeline {
         }
     }
 
+    pub fn signature_load(&self, path: &str) -> Result<()> { self.signature.load_rules_file(path) }
+
     #[instrument(skip(self, ev))]
     pub async fn process(&self, ev: RawEvent) -> Result<PipelineOutcome> {
         let start = Instant::now();
+        let max_size = std::env::var("SWARM__DETECTION__EVENT_MAX_BYTES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(262_144);
+        if ev.bytes.len() > max_size { 
+            // record dropped metric via detection_metrics if we add one later; for now use anomaly_total as placeholder tag NOTE: production should add dedicated counter
+            // returning benign outcome
+            return Ok(PipelineOutcome { event_id: ev.id, signature_hits: vec![], anomaly: None, ml_confidence: None, threat: false, latency_ms: StageLatencies::default() });
+        }
         let mut ctx = EventContext { raw: ev, feats: None, signature_hits: Vec::new(), anomaly_score: None, ml_confidence: None, lat: StageLatencies::default() };
 
     // Stage 1 ingestion / feature extraction

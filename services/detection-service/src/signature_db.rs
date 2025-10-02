@@ -14,6 +14,8 @@ use std::fs::File;
 use sha2::Sha256;
 use sha2::Digest as _; // for finalize
 use serde_yaml;
+use ed25519_dalek::{Verifier, Signature, VerifyingKey};
+use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SignatureMeta {
@@ -55,6 +57,16 @@ impl SignatureDb {
         if !path.exists() { return Err(anyhow!("rules file missing")); }
         let f = File::open(&path)?;
         let mmap = unsafe { Mmap::map(&f)? };
+        // If signature verification enabled, expect <file>.sig and env SWARM__DETECTION__RULES_PUBKEY (base64)
+        if std::env::var("SWARM__DETECTION__RULES_VERIFY").map(|v| v=="1"|| v.eq_ignore_ascii_case("true")).unwrap_or(false) {
+            let sig_path = format!("{file}.sig");
+            let pub_b64 = std::env::var("SWARM__DETECTION__RULES_PUBKEY")?;
+            let pub_bytes = B64.decode(pub_b64)?;
+            let vk = VerifyingKey::from_bytes(&pub_bytes.try_into().map_err(|_| anyhow!("invalid pubkey length"))?)?;
+            let sig_bytes = std::fs::read(&sig_path)?;
+            let sig = Signature::from_slice(&sig_bytes)?;
+            vk.verify(&mmap, &sig).map_err(|e| anyhow!("rules signature verify failed: {e}"))?;
+        }
         // Detect format by extension
         let metas: Vec<SignatureMeta> = if file.ends_with(".yaml") || file.ends_with(".yml") {
             serde_yaml::from_slice(&mmap)?

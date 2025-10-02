@@ -153,6 +153,11 @@ impl OnnxModel {
         #[cfg(feature = "onnx")] {
             let metadata = std::fs::metadata(path)?;
             let mtime = metadata.modified()?;
+            if let Ok(expect) = std::env::var("SWARM__DETECTION__ML__MODEL_SHA256") {
+                use sha2::{Sha256, Digest}; use std::io::Read;
+                let mut f = std::fs::File::open(path)?; let mut buf = Vec::new(); f.read_to_end(&mut buf)?; let mut h=Sha256::new(); h.update(&buf); let got = format!("{:x}", h.finalize());
+                if !expect.is_empty() && !expect.eq_ignore_ascii_case(&got) { return Err(anyhow!("model hash mismatch expected={expect} got={got}")); }
+            }
             let model = tract_onnx::onnx().model_for_path(path)?
                 .into_optimized()?
                 .into_runnable()?;
@@ -188,6 +193,9 @@ impl OnnxModel {
             let meta = std::fs::metadata(&self.path)?;
             let mtime = meta.modified()?;
             if mtime > self.inner.load().mtime { // changed
+                if let Ok(expect) = std::env::var("SWARM__DETECTION__ML__MODEL_SHA256") {
+                    use sha2::{Sha256, Digest}; use std::io::Read; let mut f = std::fs::File::open(&self.path)?; let mut buf=Vec::new(); f.read_to_end(&mut buf)?; let mut h=Sha256::new(); h.update(&buf); let got = format!("{:x}", h.finalize()); if !expect.is_empty() && !expect.eq_ignore_ascii_case(&got) { return Err(anyhow!("model reload hash mismatch expected={expect} got={got}")); }
+                }
                 let model = tract_onnx::onnx().model_for_path(&self.path)?
                     .into_optimized()?.into_runnable()?;
                 let input_dim = model.model.inputs.get(0)
