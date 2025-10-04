@@ -1,0 +1,104 @@
+{
+  "rules": [
+    {
+      "ID": "rule-sql-injection-001",
+      "Type": "pattern",
+      "Pattern": "' OR '1'='1",
+      "Version": 1,
+      "Enabled": true,
+      "SamplePercent": 100,
+      "Severity": "critical",
+      "Tags": ["sqli", "web", "owasp-top10"]
+    },
+    {
+      "ID": "rule-xss-001",
+      "Type": "pattern",
+      "Pattern": "<script>",
+      "Version": 1,
+      "Enabled": true,
+      "SamplePercent": 100,
+      "Severity": "high",
+      "Tags": ["xss", "web", "injection"]
+    },
+    {
+      "ID": "rule-cmd-injection-001",
+      "Type": "pattern",
+      "Pattern": "; rm -rf /",
+      "Version": 1,
+      "Enabled": true,
+      "SamplePercent": 100,
+      "Severity": "critical",
+      "Tags": ["cmd-injection", "linux", "rce"]
+    },
+    {
+      "ID": "rule-lfi-001",
+      "Type": "pattern",
+      "Pattern": "../../../etc/passwd",
+      "Version": 1,
+      "Enabled": true,
+      "SamplePercent": 100,
+      "Severity": "high",
+      "Tags": ["lfi", "path-traversal", "file-access"]
+    },
+    {
+      "ID": "rule-xxe-001",
+      "Type": "pattern",
+      "Pattern": "<!ENTITY",
+      "Version": 1,
+      "Enabled": true,
+      "SamplePercent": 100,
+      "Severity": "high",
+      "Tags": ["xxe", "xml", "injection"]
+    },
+    {
+      "ID": "rule-jwt-none-001",
+      "Type": "pattern",
+      "Pattern": "\"alg\":\"none\"",
+      "Version": 1,
+      "Enabled": true,
+      "SamplePercent": 100,
+      "Severity": "critical",
+      "Tags": ["jwt", "auth-bypass", "crypto"]
+    },
+    {
+      "ID": "rule-ssrf-001",
+      "Type": "pattern",
+      "Pattern": "http://169.254.169.254",
+      "Version": 1,
+      "Enabled": true,
+      "SamplePercent": 100,
+      "Severity": "high",
+      "Tags": ["ssrf", "aws", "metadata"]
+    },
+    {
+      "ID": "rule-deserialization-001",
+      "Type": "pattern",
+      "Pattern": "pickle.loads",
+      "Version": 1,
+      "Enabled": true,
+      "SamplePercent": 100,
+      "Severity": "critical",
+      "Tags": ["deserialization", "python", "rce"]
+    },
+    {
+      "ID": "rule-nosql-injection-001",
+      "Type": "pattern",
+      "Pattern": "{\"$ne\":null}",
+      "Version": 1,
+      "Enabled": true,
+      "SamplePercent": 100,
+      "Severity": "high",
+      "Tags": ["nosql-injection", "mongodb", "db"]
+    },
+    {
+      "ID": "rule-open-redirect-001",
+      "Type": "pattern",
+      "Pattern": "redirect=http://evil.com",
+      "Version": 1,
+      "Enabled": true,
+      "SamplePercent": 80,
+      "Severity": "medium",
+      "Tags": ["open-redirect", "phishing", "web"]
+    }
+  ]
+}

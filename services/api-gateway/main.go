@@ -1,5 +1,5 @@
 package main
 
-// Entry wrapper delegating to implementation in main_new.go
-func main() { realMain() }
-
+// Entry wrapper - uses production-grade gateway with circuit breakers,
+// hybrid rate limiting, request validation, and distributed tracing
+func main() { realMainV2() }

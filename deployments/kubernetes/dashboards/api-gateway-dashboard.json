@@ -1,0 +1,115 @@
+{
+  "dashboard": {
+    "title": "SwarmGuard - API Gateway Dashboard",
+    "tags": ["swarmguard", "api-gateway", "production"],
+    "timezone": "browser",
+    "panels": [
+      {
+        "id": 1,
+        "title": "Request Rate (RPS)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(swarm_api_requests_total[5m])",
+            "legendFormat": "{{method}} {{path}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+      },
+      {
+        "id": 2,
+        "title": "P99 Latency",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.99, rate(swarm_api_latency_ms_bucket[5m]))",
+            "legendFormat": "{{path}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+      },
+      {
+        "id": 3,
+        "title": "Error Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(swarm_api_requests_total{status=~\"5..\"}[5m]) / rate(swarm_api_requests_total[5m])",
+            "legendFormat": "5xx Error Rate"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+        "alert": {
+          "name": "High Error Rate",
+          "conditions": [
+            {
+              "evaluator": {"type": "gt", "params": [0.05]},
+              "operator": {"type": "and"},
+              "query": {"params": ["A", "5m", "now"]},
+              "reducer": {"type": "avg"}
+            }
+          ],
+          "frequency": "60s",
+          "handler": 1,
+          "message": "API Gateway error rate exceeded 5%",
+          "noDataState": "no_data",
+          "executionErrorState": "alerting"
+        }
+      },
+      {
+        "id": 4,
+        "title": "Rate Limit Denials",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(swarm_api_rate_limited_total[5m])",
+            "legendFormat": "Rate Limited"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+      },
+      {
+        "id": 5,
+        "title": "Circuit Breaker Status",
+        "type": "table",
+        "targets": [
+          {
+            "expr": "swarm_api_circuit_breaker_state",
+            "legendFormat": "{{service}}: {{state}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+      },
+      {
+        "id": 6,
+        "title": "Top Endpoints by Traffic",
+        "type": "bargauge",
+        "targets": [
+          {
+            "expr": "topk(10, sum by (path) (rate(swarm_api_requests_total[5m])))",
+            "legendFormat": "{{path}}"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+      },
+      {
+        "id": 7,
+        "title": "Resource Usage",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "sum(rate(container_cpu_usage_seconds_total{pod=~\"api-gateway-.*\"}[5m])) by (pod)",
+            "legendFormat": "{{pod}} CPU"
+          },
+          {
+            "expr": "sum(container_memory_working_set_bytes{pod=~\"api-gateway-.*\"}) by (pod) / 1024 / 1024",
+            "legendFormat": "{{pod}} Memory (Mi)"
+          }
+        ],
+        "gridPos": {"h": 8, "w": 24, "x": 0, "y": 24}
+      }
+    ],
+    "refresh": "10s",
+    "time": {"from": "now-1h", "to": "now"}
+  }
+}

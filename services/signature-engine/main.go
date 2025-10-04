@@ -209,29 +209,27 @@ func main() {
 	if ruleDir == "" {
 		ruleDir = "./rules"
 	}
+	// Initialize hot-reload scanner with advanced features
+	loader := scanner.NewFileRuleLoader(filepath.Join(ruleDir, "default_rules.json"))
+	hotReloadScanner, err := scanner.NewHotReloadScanner(loader, 5*time.Second)
+	if err != nil {
+		slog.Error("failed to initialize hot reload scanner", "error", err)
+		os.Exit(1)
+	}
+	defer hotReloadScanner.Stop()
+	
+	// Initialize metrics collector
+	metricsCollector := scanner.NewMetricsCollector()
+	
+	// Legacy store for backward compatibility
 	store := NewMemoryRuleStore(ruleDir, 3*time.Second)
 	if err := store.Reload(); err != nil {
-		slog.Error("initial rule load failed", "error", err)
+		slog.Warn("legacy rule store load failed", "error", err)
 	}
-	// atomic scanner storage for lock-free hot swap
-	var activeScanner atomic.Value // stores Scanner
-	buildScanner := func(rules []Rule) {
-		ext := make([]scanner.ExtendedRule, 0, len(rules))
-		for _, r := range rules {
-			sp := r.SamplePercent
-			if sp == 0 {
-				sp = 100
-			}
-			ext = append(ext, scanner.ExtendedRule{Rule: scanner.Rule{ID: r.ID, Type: r.Type, Pattern: r.Pattern, Version: r.Version, Enabled: r.Enabled}, SamplePercent: sp, Severity: r.Severity, Tags: r.Tags})
-		}
-		auto, err := scanner.BuildAho(ext)
-		if err != nil {
-			slog.Error("automaton build failed", "error", err)
-			return
-		}
-		activeScanner.Store(scanner.NewAhoScanner(auto))
-	}
-	buildScanner(store.All())
+	
+	slog.Info("signature engine initialized", 
+		"rules", hotReloadScanner.GetMetadata().RuleCount,
+		"version", hotReloadScanner.GetMetadata().Version)
 
 	// metrics instruments
 	meter := otel.Meter("swarm-go")
@@ -252,8 +250,9 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
+	// Enhanced scan endpoint with streaming support and advanced metrics
 	mux.HandleFunc("/scan", func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
+		scanStart := time.Now()
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
@@ -266,26 +265,43 @@ func main() {
 		}
 		scanActive.Add(r.Context(), 1)
 		defer scanActive.Add(r.Context(), -1)
-		scVal := activeScanner.Load()
-		if scVal == nil {
-			scanErrors.Add(r.Context(), 1)
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		sc := scVal.(Scanner)
-		matches := sc.Scan(body)
-		for _, m := range matches {
+		
+		// Use hot reload scanner and record metrics
+		matches := hotReloadScanner.Scan(body)
+		durationUs := time.Since(scanStart).Microseconds()
+		metricsCollector.RecordScan(durationUs, matches, int64(len(body)))
+		
+		// Convert to API response format
+		apiMatches := make([]MatchResult, len(matches))
+		for i, m := range matches {
+			apiMatches[i] = MatchResult{
+				RuleID:    m.RuleID,
+				RuleType:  m.RuleType,
+				Offset:    m.Offset,
+				Length:    m.Length,
+				Severity:  m.Severity,
+				Version:   m.Version,
+				Sampled:   m.Sampled,
+				Automaton: m.Automaton,
+			}
+			
 			attrs := metric.WithAttributes(attribute.String("rule_type", m.RuleType))
 			if m.Severity != "" {
-				attrs = metric.WithAttributes(attribute.String("rule_type", m.RuleType), attribute.String("severity", m.Severity))
+				attrs = metric.WithAttributes(
+					attribute.String("rule_type", m.RuleType), 
+					attribute.String("severity", m.Severity),
+				)
 			}
 			matchCounter.Add(r.Context(), 1, attrs)
 		}
+		
 		bytesHist.Record(r.Context(), int64(len(body)))
-		latencyHist.Record(r.Context(), time.Since(start).Seconds())
+		latencyHist.Record(r.Context(), time.Since(scanStart).Seconds())
+		
 		w.Header().Set("Content-Type", "application/json")
-		w.Header().Set("X-Rule-Count", "")
-		_ = json.NewEncoder(w).Encode(matches)
+		w.Header().Set("X-Rule-Count", fmt.Sprintf("%d", hotReloadScanner.GetMetadata().RuleCount))
+		w.Header().Set("X-Scanner-Version", hotReloadScanner.GetMetadata().Version)
+		_ = json.NewEncoder(w).Encode(apiMatches)
 	})
 	reloadHandler := func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -293,22 +309,31 @@ func main() {
 			return
 		}
 		t0 := time.Now()
-		if err := store.Reload(); err != nil {
+		
+		// Force reload the hot-reload scanner
+		if err := hotReloadScanner.ForceReload(); err != nil {
 			reloadCounter.Add(r.Context(), 1, metric.WithAttributes(attribute.String("status", "failure")))
 			loadErrors.Add(r.Context(), 1)
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(err.Error()))
 			return
 		}
-		bStart := time.Now()
-		buildScanner(store.All())
-		buildDur.Record(r.Context(), time.Since(bStart).Seconds())
+		
+		meta := hotReloadScanner.GetMetadata()
 		dur := time.Since(t0).Seconds()
 		reloadDur.Record(r.Context(), dur)
+		buildDur.Record(r.Context(), float64(meta.BuildDurationMs)/1000.0)
 		reloadCounter.Add(r.Context(), 1, metric.WithAttributes(attribute.String("status", "success")))
-		ruleGauge.Add(r.Context(), 0) // noop but ensures instrument used
+		ruleGauge.Add(r.Context(), int64(meta.RuleCount))
+		
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "duration_seconds": dur, "rules": len(store.All()), "version": store.Version()})
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"status":           "ok",
+			"duration_seconds": dur,
+			"rules":            meta.RuleCount,
+			"version":          meta.Version,
+			"reload_count":     meta.ReloadCount,
+		})
 	}
 	mux.HandleFunc("/reload", reloadHandler)                                // backward compatible
 	mux.HandleFunc("/v1/rules/reload", reloadHandler)                       // versioned
@@ -328,8 +353,31 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{"version": store.Version(), "rules": store.All()})
 	})
+	// Enhanced stats endpoint with detailed metrics
 	mux.HandleFunc("/stats", func(w http.ResponseWriter, r *http.Request) {
-		st := map[string]any{"rules": len(store.All()), "goroutines": runtime.NumGoroutine(), "version": store.Version()}
+		meta := hotReloadScanner.GetMetadata()
+		metrics := metricsCollector.GetStats()
+		
+		st := map[string]any{
+			"rules":      meta.RuleCount,
+			"goroutines": runtime.NumGoroutine(),
+			"version":    meta.Version,
+			"scanner": map[string]any{
+				"loaded_at":          meta.LoadedAt.Format(time.RFC3339),
+				"last_reload_at":     meta.LastReloadAt.Format(time.RFC3339),
+				"reload_count":       meta.ReloadCount,
+				"build_duration_ms":  meta.BuildDurationMs,
+			},
+			"metrics": map[string]any{
+				"total_scans":          metrics.TotalScans,
+				"total_matches":        metrics.TotalMatches,
+				"total_bytes_scanned":  metrics.TotalBytesScanned,
+				"total_errors":         metrics.TotalErrors,
+				"recent_throughput":    metrics.RecentThroughputBPS,
+				"recent_scans_per_sec": metrics.RecentScansPerSec,
+				"top_rules":            metrics.TopRules,
+			},
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(st)
 	})
@@ -346,26 +394,8 @@ func main() {
 			cancel()
 		}
 	}()
-	// background rule reload
-	go func() { // background adaptive reload with jitter
-		base := 3 * time.Second
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(base + time.Duration(rand.Intn(500))*time.Millisecond):
-				before := len(store.All())
-				if err := store.Reload(); err != nil {
-					slog.Warn("background reload failed", "error", err)
-					continue
-				}
-				after := len(store.All())
-				if after != before { // only rebuild if count changed (cheap heuristic)
-					buildScanner(store.All())
-				}
-			}
-		}
-	}()
+	// Background adaptive reload is now handled by HotReloadScanner automatically
+	// Legacy background reload removed - HotReloadScanner has its own watcher
 
 	slog.Info("service started")
 	<-ctx.Done()

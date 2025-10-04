@@ -600,7 +600,10 @@ func anyToBytes(v any) []byte {
 	case float64:
 		return []byte(strconv.FormatFloat(t, 'f', -1, 64))
 	case bool:
-		if t { return []byte("true") }; return []byte("false")
+		if t {
+			return []byte("true")
+		}
+		return []byte("false")
 	default:
 		// fallback JSON
 		b, _ := json.Marshal(t)
@@ -628,6 +631,7 @@ type rateLimiter struct {
 	tokens   int
 	updated  time.Time
 }
+
 func newRateLimiter(capacity, refill int, interval time.Duration) *rateLimiter {
 	return &rateLimiter{capacity: capacity, refill: refill, interval: interval, tokens: capacity, updated: time.Now()}
 }

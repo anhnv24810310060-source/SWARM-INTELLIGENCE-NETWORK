@@ -362,6 +362,13 @@ mod resilience; // new module providing retry & circuit breaker
 pub use resilience::{retry_async, RetryConfig, CircuitBreaker, BreakerState};
 pub mod resilience_telemetry; // telemetry metrics for resilience primitives
 pub use resilience_telemetry::{register_metrics as register_resilience_metrics, ResilienceMetrics};
+pub mod resilience_advanced; // Production-ready resilience patterns
+pub use resilience_advanced::{
+    CircuitBreaker as AdvancedCircuitBreaker, CircuitState, CircuitBreakerConfig,
+    CircuitBreakerStats, RetryExecutor, RetryConfig as AdvancedRetryConfig,
+    RateLimiter, Bulkhead, BulkheadPermit, BulkheadStats,
+    ResilienceManager, ResilienceStats
+};
 
 // Advanced swarm intelligence modules
 pub mod ml_detection;
@@ -373,6 +380,8 @@ pub mod transport_quic;
 pub mod lifecycle;
 pub mod reputation;
 mod metrics_ext; // extended metrics groups
+pub mod crypto_bls; // BLS signatures for consensus
+pub mod crypto_vrf; // VRF for fair validator selection
 
 pub use ml_detection::{MLDetectionPipeline, ThreatEvent, DetectionResult, ThreatLevel};
 pub use federated_learning::{FederatedLearningCoordinator, ModelGradient, GlobalModel, AggregationMethod};
@@ -383,6 +392,8 @@ pub use transport_quic::{QuicTransport, QuicConfig, QuicConnectionHandle};
 pub use lifecycle::{BootstrapState, BootstrapPhase};
 pub use reputation::{ReputationService, ReputationConfig};
 pub use metrics_ext::{EXTENDED_METRICS, ExtendedMetrics};
+pub use crypto_bls::{BlsSignature, BlsPublicKey, BlsSecretKey, generate_keypair, sign, verify, aggregate_signatures, batch_verify, ThresholdSignature};
+pub use crypto_vrf::{VrfProof, VrfOutput, VrfSecretKey, VrfPublicKey, generate_vrf_keypair, vrf_prove, vrf_verify, select_validator_with_vrf, SlashingRecord, SlashReason, SlashingConfig, calculate_slash_amount};
 
 // --- Test utilities (not exported in normal builds) ---
 #[cfg(test)]

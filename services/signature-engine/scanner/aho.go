@@ -35,8 +35,9 @@ type AhoAutomaton struct {
 
 // AhoScanner is concurrency-safe after construction; cloning not required.
 type AhoScanner struct {
-	automaton *AhoAutomaton
-	rngPool   sync.Pool // per-scan RNG for sampling
+	automaton   *AhoAutomaton
+	rngPool     sync.Pool    // per-scan RNG for sampling
+	bloomFilter *BloomFilter // pre-filter for fast negative lookups
 }
 
 // BuildAho builds an automaton from ExtendedRule slice; returns error if invalid rule encountered.
@@ -104,6 +105,23 @@ func BuildAho(rules []ExtendedRule) (*AhoAutomaton, error) {
 func NewAhoScanner(auto *AhoAutomaton) *AhoScanner {
 	s := &AhoScanner{automaton: auto}
 	s.rngPool.New = func() any { return rand.New(rand.NewSource(time.Now().UnixNano())) }
+
+	// Build bloom filter from all patterns for fast pre-filtering
+	bf := NewBloomFilter(auto.ruleCount*10, 0.01) // 1% false positive rate
+	var collectPatterns func(*acNode)
+	collectPatterns = func(n *acNode) {
+		for _, r := range n.out {
+			if r.Enabled {
+				bf.Add([]byte(r.Pattern))
+			}
+		}
+		for _, child := range n.next {
+			collectPatterns(child)
+		}
+	}
+	collectPatterns(auto.root)
+	s.bloomFilter = bf
+
 	return s
 }
 

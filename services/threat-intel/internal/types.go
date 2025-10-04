@@ -6,9 +6,11 @@ import "time"
 type IndicatorType string
 
 const (
-	IndicatorIP     IndicatorType = "ip"
-	IndicatorDomain IndicatorType = "domain"
-	IndicatorHash   IndicatorType = "hash"
+	IndicatorIP        IndicatorType = "ip"
+	IndicatorDomain    IndicatorType = "domain"
+	IndicatorHash      IndicatorType = "hash"
+	IndicatorTechnique IndicatorType = "technique" // MITRE ATT&CK technique
+	IndicatorURL       IndicatorType = "url"
 )
 
 // Indicator represents a normalized threat indicator record

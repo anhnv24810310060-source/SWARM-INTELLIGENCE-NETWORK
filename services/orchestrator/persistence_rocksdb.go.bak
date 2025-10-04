@@ -1,0 +1,445 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"sync"
+	"time"
+
+	"github.com/tecbot/gorocksdb"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+)
+
+// WorkflowStore provides persistent storage for workflows and executions using RocksDB
+type WorkflowStore struct {
+	db             *gorocksdb.DB
+	ro             *gorocksdb.ReadOptions
+	wo             *gorocksdb.WriteOptions
+	mu             sync.RWMutex
+	memCache       map[string]Workflow           // Hot cache for workflows
+	executionCache map[string]*WorkflowExecution // Recent executions
+	maxCacheSize   int
+
+	// Metrics
+	readLatency  metric.Float64Histogram
+	writeLatency metric.Float64Histogram
+	cacheHits    metric.Int64Counter
+	cacheMisses  metric.Int64Counter
+}
+
+// Key prefixes for different data types
+const (
+	prefixWorkflow     = "wf:"
+	prefixExecution    = "exec:"
+	prefixExecutionIdx = "idx:exec:" // Time-based index
+	prefixVersion      = "ver:"      // Workflow version history
+	prefixSchedule     = "sched:"    // Scheduled workflow metadata
+)
+
+// NewWorkflowStore creates a persistent workflow store with RocksDB backend
+func NewWorkflowStore(dbPath string, meter metric.Meter) (*WorkflowStore, error) {
+	// RocksDB options for optimal performance
+	bbto := gorocksdb.NewDefaultBlockBasedTableOptions()
+	bbto.SetBlockCache(gorocksdb.NewLRUCache(512 << 20)) // 512MB cache
+	bbto.SetFilterPolicy(gorocksdb.NewBloomFilter(10))   // Bloom filter for fast lookups
+	bbto.SetBlockSize(16 * 1024)                         // 16KB blocks
+
+	opts := gorocksdb.NewDefaultOptions()
+	opts.SetBlockBasedTableFactory(bbto)
+	opts.SetCreateIfMissing(true)
+	opts.SetCompression(gorocksdb.SnappyCompression)
+	opts.SetMaxBackgroundCompactions(4)
+	opts.SetMaxBackgroundFlushes(2)
+	opts.SetWriteBufferSize(128 << 20) // 128MB write buffer
+	opts.SetMaxWriteBufferNumber(3)
+	opts.SetTargetFileSizeBase(64 << 20) // 64MB SST files
+	opts.SetLevel0FileNumCompactionTrigger(8)
+	opts.SetMaxBytesForLevelBase(512 << 20) // 512MB for level 1
+
+	db, err := gorocksdb.OpenDb(opts, dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("open rocksdb: %w", err)
+	}
+
+	readLatency, _ := meter.Float64Histogram("swarm_workflow_db_read_ms")
+	writeLatency, _ := meter.Float64Histogram("swarm_workflow_db_write_ms")
+	cacheHits, _ := meter.Int64Counter("swarm_workflow_cache_hits_total")
+	cacheMisses, _ := meter.Int64Counter("swarm_workflow_cache_misses_total")
+
+	store := &WorkflowStore{
+		db:             db,
+		ro:             gorocksdb.NewDefaultReadOptions(),
+		wo:             gorocksdb.NewDefaultWriteOptions(),
+		memCache:       make(map[string]Workflow),
+		executionCache: make(map[string]*WorkflowExecution),
+		maxCacheSize:   1000,
+		readLatency:    readLatency,
+		writeLatency:   writeLatency,
+		cacheHits:      cacheHits,
+		cacheMisses:    cacheMisses,
+	}
+
+	// Enable sync writes for durability (can be disabled for higher throughput)
+	store.wo.SetSync(true)
+
+	// Load workflows into memory cache on startup
+	if err := store.warmCache(); err != nil {
+		return nil, fmt.Errorf("warm cache: %w", err)
+	}
+
+	return store, nil
+}
+
+// Close gracefully closes the database
+func (ws *WorkflowStore) Close() error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	ws.ro.Destroy()
+	ws.wo.Destroy()
+	ws.db.Close()
+
+	return nil
+}
+
+// PutWorkflow stores a workflow with versioning support
+func (ws *WorkflowStore) PutWorkflow(ctx context.Context, wf Workflow) error {
+	start := time.Now()
+	defer func() {
+		ws.writeLatency.Record(ctx, float64(time.Since(start).Milliseconds()),
+			metric.WithAttributes(attribute.String("operation", "put_workflow")))
+	}()
+
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	// Serialize workflow
+	data, err := json.Marshal(wf)
+	if err != nil {
+		return fmt.Errorf("marshal workflow: %w", err)
+	}
+
+	key := prefixWorkflow + wf.Name
+
+	// Check if workflow exists (for versioning)
+	existingData, err := ws.db.Get(ws.ro, []byte(key))
+	if err == nil && existingData.Size() > 0 {
+		// Store previous version
+		versionKey := fmt.Sprintf("%s%s:%d", prefixVersion, wf.Name, time.Now().UnixNano())
+		if err := ws.db.Put(ws.wo, []byte(versionKey), existingData.Data()); err != nil {
+			existingData.Free()
+			return fmt.Errorf("store version: %w", err)
+		}
+	}
+	if existingData != nil {
+		existingData.Free()
+	}
+
+	// Write new workflow
+	if err := ws.db.Put(ws.wo, []byte(key), data); err != nil {
+		return fmt.Errorf("write workflow: %w", err)
+	}
+
+	// Update memory cache
+	ws.memCache[wf.Name] = wf
+
+	return nil
+}
+
+// GetWorkflow retrieves a workflow by name with cache support
+func (ws *WorkflowStore) GetWorkflow(ctx context.Context, name string) (Workflow, bool, error) {
+	start := time.Now()
+	defer func() {
+		ws.readLatency.Record(ctx, float64(time.Since(start).Milliseconds()),
+			metric.WithAttributes(attribute.String("operation", "get_workflow")))
+	}()
+
+	ws.mu.RLock()
+
+	// Check memory cache first
+	if wf, found := ws.memCache[name]; found {
+		ws.mu.RUnlock()
+		ws.cacheHits.Add(ctx, 1, metric.WithAttributes(attribute.String("type", "workflow")))
+		return wf, true, nil
+	}
+
+	ws.mu.RUnlock()
+	ws.cacheMisses.Add(ctx, 1, metric.WithAttributes(attribute.String("type", "workflow")))
+
+	// Read from database
+	key := prefixWorkflow + name
+	data, err := ws.db.Get(ws.ro, []byte(key))
+	if err != nil {
+		return Workflow{}, false, fmt.Errorf("read workflow: %w", err)
+	}
+	defer data.Free()
+
+	if data.Size() == 0 {
+		return Workflow{}, false, nil
+	}
+
+	var wf Workflow
+	if err := json.Unmarshal(data.Data(), &wf); err != nil {
+		return Workflow{}, false, fmt.Errorf("unmarshal workflow: %w", err)
+	}
+
+	// Update cache
+	ws.mu.Lock()
+	ws.memCache[name] = wf
+	ws.mu.Unlock()
+
+	return wf, true, nil
+}
+
+// ListWorkflows returns all workflows with pagination
+func (ws *WorkflowStore) ListWorkflows(ctx context.Context, limit, offset int) ([]Workflow, error) {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+
+	workflows := make([]Workflow, 0, len(ws.memCache))
+	for _, wf := range ws.memCache {
+		workflows = append(workflows, wf)
+	}
+
+	// Apply pagination
+	start := offset
+	if start > len(workflows) {
+		start = len(workflows)
+	}
+
+	end := start + limit
+	if end > len(workflows) {
+		end = len(workflows)
+	}
+
+	return workflows[start:end], nil
+}
+
+// DeleteWorkflow removes a workflow (soft delete - keeps versions)
+func (ws *WorkflowStore) DeleteWorkflow(ctx context.Context, name string) error {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	key := prefixWorkflow + name
+
+	// Archive before delete
+	data, err := ws.db.Get(ws.ro, []byte(key))
+	if err == nil && data.Size() > 0 {
+		archiveKey := fmt.Sprintf("%sarchive:%s:%d", prefixVersion, name, time.Now().UnixNano())
+		_ = ws.db.Put(ws.wo, []byte(archiveKey), data.Data())
+	}
+	if data != nil {
+		data.Free()
+	}
+
+	// Delete workflow
+	if err := ws.db.Delete(ws.wo, []byte(key)); err != nil {
+		return fmt.Errorf("delete workflow: %w", err)
+	}
+
+	// Remove from cache
+	delete(ws.memCache, name)
+
+	return nil
+}
+
+// PutExecution stores a workflow execution result
+func (ws *WorkflowStore) PutExecution(ctx context.Context, exec *WorkflowExecution) error {
+	start := time.Now()
+	defer func() {
+		ws.writeLatency.Record(ctx, float64(time.Since(start).Milliseconds()),
+			metric.WithAttributes(attribute.String("operation", "put_execution")))
+	}()
+
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
+
+	// Serialize execution
+	data, err := json.Marshal(exec)
+	if err != nil {
+		return fmt.Errorf("marshal execution: %w", err)
+	}
+
+	// Write batch for atomicity
+	batch := gorocksdb.NewWriteBatch()
+	defer batch.Destroy()
+
+	// Primary key: execution ID
+	execKey := prefixExecution + exec.WorkflowID
+	batch.Put([]byte(execKey), data)
+
+	// Time-based index for range queries
+	indexKey := fmt.Sprintf("%s%s:%d:%s", prefixExecutionIdx, exec.WorkflowName, exec.StartTime.UnixNano(), exec.WorkflowID)
+	batch.Put([]byte(indexKey), []byte(exec.WorkflowID))
+
+	if err := ws.db.Write(ws.wo, batch); err != nil {
+		return fmt.Errorf("write execution: %w", err)
+	}
+
+	// Update execution cache with LRU eviction
+	if len(ws.executionCache) >= ws.maxCacheSize {
+		ws.evictOldestExecution()
+	}
+	ws.executionCache[exec.WorkflowID] = exec
+
+	return nil
+}
+
+// GetExecution retrieves an execution by ID
+func (ws *WorkflowStore) GetExecution(ctx context.Context, id string) (*WorkflowExecution, bool, error) {
+	start := time.Now()
+	defer func() {
+		ws.readLatency.Record(ctx, float64(time.Since(start).Milliseconds()),
+			metric.WithAttributes(attribute.String("operation", "get_execution")))
+	}()
+
+	ws.mu.RLock()
+
+	// Check cache
+	if exec, found := ws.executionCache[id]; found {
+		ws.mu.RUnlock()
+		ws.cacheHits.Add(ctx, 1, metric.WithAttributes(attribute.String("type", "execution")))
+		return exec, true, nil
+	}
+
+	ws.mu.RUnlock()
+	ws.cacheMisses.Add(ctx, 1, metric.WithAttributes(attribute.String("type", "execution")))
+
+	// Read from database
+	key := prefixExecution + id
+	data, err := ws.db.Get(ws.ro, []byte(key))
+	if err != nil {
+		return nil, false, fmt.Errorf("read execution: %w", err)
+	}
+	defer data.Free()
+
+	if data.Size() == 0 {
+		return nil, false, nil
+	}
+
+	var exec WorkflowExecution
+	if err := json.Unmarshal(data.Data(), &exec); err != nil {
+		return nil, false, fmt.Errorf("unmarshal execution: %w", err)
+	}
+
+	return &exec, true, nil
+}
+
+// ListExecutions returns executions for a workflow with time range filtering
+func (ws *WorkflowStore) ListExecutions(ctx context.Context, workflowName string, startTime, endTime time.Time, limit int) ([]*WorkflowExecution, error) {
+	// Create iterator
+	it := ws.db.NewIterator(ws.ro)
+	defer it.Close()
+
+	// Seek to start of time range
+	prefix := fmt.Sprintf("%s%s:", prefixExecutionIdx, workflowName)
+	startKey := fmt.Sprintf("%s%d:", prefix, startTime.UnixNano())
+
+	executions := make([]*WorkflowExecution, 0, limit)
+
+	for it.Seek([]byte(startKey)); it.ValidForPrefix([]byte(prefix)) && len(executions) < limit; it.Next() {
+		// Extract execution ID from index
+		execID := string(it.Value().Data())
+
+		// Load full execution
+		exec, found, err := ws.GetExecution(ctx, execID)
+		if err != nil {
+			continue
+		}
+		if !found {
+			continue
+		}
+
+		// Check if within time range
+		if exec.StartTime.After(endTime) {
+			break
+		}
+
+		executions = append(executions, exec)
+	}
+
+	return executions, nil
+}
+
+// GetWorkflowVersions retrieves version history of a workflow
+func (ws *WorkflowStore) GetWorkflowVersions(ctx context.Context, name string, limit int) ([]Workflow, error) {
+	it := ws.db.NewIterator(ws.ro)
+	defer it.Close()
+
+	prefix := fmt.Sprintf("%s%s:", prefixVersion, name)
+	versions := make([]Workflow, 0, limit)
+
+	// Iterate in reverse to get newest first
+	it.SeekForPrev([]byte(prefix + "~")) // '~' is after numbers in ASCII
+
+	for it.ValidForPrefix([]byte(prefix)) && len(versions) < limit {
+		var wf Workflow
+		if err := json.Unmarshal(it.Value().Data(), &wf); err != nil {
+			it.Prev()
+			continue
+		}
+
+		versions = append(versions, wf)
+		it.Prev()
+	}
+
+	return versions, nil
+}
+
+// Compact triggers manual compaction for better read performance
+func (ws *WorkflowStore) Compact(ctx context.Context) error {
+	ws.db.CompactRange(gorocksdb.Range{
+		Start: nil,
+		Limit: nil,
+	})
+	return nil
+}
+
+// GetStats returns database statistics
+func (ws *WorkflowStore) GetStats() map[string]string {
+	return map[string]string{
+		"rocksdb.stats":              ws.db.GetProperty("rocksdb.stats"),
+		"rocksdb.num-files-at-level": ws.db.GetProperty("rocksdb.num-files-at-level0"),
+		"rocksdb.compaction-pending": ws.db.GetProperty("rocksdb.compaction-pending"),
+		"rocksdb.mem-table-flush":    ws.db.GetProperty("rocksdb.mem-table-flush-pending"),
+		"rocksdb.estimate-num-keys":  ws.db.GetProperty("rocksdb.estimate-num-keys"),
+	}
+}
+
+// warmCache loads frequently accessed workflows into memory
+func (ws *WorkflowStore) warmCache() error {
+	it := ws.db.NewIterator(ws.ro)
+	defer it.Close()
+
+	count := 0
+	for it.Seek([]byte(prefixWorkflow)); it.ValidForPrefix([]byte(prefixWorkflow)); it.Next() {
+		var wf Workflow
+		if err := json.Unmarshal(it.Value().Data(), &wf); err != nil {
+			continue
+		}
+
+		ws.memCache[wf.Name] = wf
+		count++
+	}
+
+	return nil
+}
+
+// evictOldestExecution removes the oldest execution from cache
+func (ws *WorkflowStore) evictOldestExecution() {
+	var oldestID string
+	var oldestTime time.Time
+
+	for id, exec := range ws.executionCache {
+		if oldestID == "" || exec.StartTime.Before(oldestTime) {
+			oldestID = id
+			oldestTime = exec.StartTime
+		}
+	}
+
+	if oldestID != "" {
+		delete(ws.executionCache, oldestID)
+	}
+}

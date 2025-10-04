@@ -32,23 +32,111 @@ type Store struct {
 	db     *badger.DB
 	blocks metric.Int64Counter
 	lag    metric.Int64Gauge
+	cache  *blockCache // LRU cache for hot blocks
 }
 
 var (
 	ErrNotFound = errors.New("block not found")
 )
 
-// Open returns a store rooted at path
+// blockCache implements simple LRU cache for recently accessed blocks
+type blockCache struct {
+	mu      sync.RWMutex
+	items   map[uint64]*Block
+	order   []uint64 // LRU order
+	maxSize int
+}
+
+func newBlockCache(size int) *blockCache {
+	return &blockCache{
+		items:   make(map[uint64]*Block),
+		order:   make([]uint64, 0, size),
+		maxSize: size,
+	}
+}
+
+func (c *blockCache) get(height uint64) (*Block, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	blk, ok := c.items[height]
+	if ok {
+		// Move to front (most recently used)
+		for i, h := range c.order {
+			if h == height {
+				c.order = append(c.order[:i], c.order[i+1:]...)
+				break
+			}
+		}
+		c.order = append([]uint64{height}, c.order...)
+	}
+	return blk, ok
+}
+
+func (c *blockCache) put(blk *Block) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.items[blk.Height]; !exists {
+		c.order = append([]uint64{blk.Height}, c.order...)
+		c.items[blk.Height] = blk
+		// Evict oldest if over capacity
+		if len(c.order) > c.maxSize {
+			oldest := c.order[len(c.order)-1]
+			delete(c.items, oldest)
+			c.order = c.order[:len(c.order)-1]
+		}
+	}
+}
+
+// Open returns a store rooted at path with optimized BadgerDB settings
 func Open(path string) (*Store, error) {
-	opts := badger.DefaultOptions(filepath.Clean(path)).WithLoggingLevel(badger.WARNING)
+	opts := badger.DefaultOptions(filepath.Clean(path)).
+		WithLoggingLevel(badger.WARNING).
+		WithBlockCacheSize(256 << 20).  // 256MB block cache
+		WithIndexCacheSize(128 << 20).  // 128MB index cache
+		WithNumLevelZeroTables(4).      // More L0 tables before compaction
+		WithNumLevelZeroTablesStall(8). // Stall writes at 8 L0 tables
+		WithValueThreshold(1024).       // Values > 1KB go to value log
+		WithNumCompactors(2)            // Parallel compaction workers
+
 	db, err := badger.Open(opts)
 	if err != nil {
 		return nil, err
 	}
+
 	m := otel.Meter("swarm-blockchain")
 	bc, _ := m.Int64Counter("swarm_blockchain_blocks_total")
 	lag, _ := m.Int64Gauge("swarm_blockchain_sync_lag_blocks")
-	return &Store{db: db, blocks: bc, lag: lag}, nil
+
+	store := &Store{
+		db:     db,
+		blocks: bc,
+		lag:    lag,
+		cache:  newBlockCache(1000), // Cache 1000 recent blocks
+	}
+
+	// Start background compaction worker
+	go store.backgroundCompaction()
+
+	return store, nil
+}
+
+// backgroundCompaction runs periodic LSM-tree compaction
+func (s *Store) backgroundCompaction() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		// Run full compaction to optimize read performance
+		if err := s.db.RunValueLogGC(0.5); err != nil && err != badger.ErrNoRewrite {
+			// Log but don't fail - GC is optional
+			continue
+		}
+
+		// Flatten LSM tree by triggering L0->L1 compaction
+		if err := s.db.Flatten(2); err != nil {
+			continue
+		}
+	}
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -87,8 +175,13 @@ func (s *Store) SaveBlock(ctx context.Context, blk *Block) error {
 	})
 }
 
-// GetBlock by height.
+// GetBlock by height with LRU cache support.
 func (s *Store) GetBlock(_ context.Context, height uint64) (*Block, error) {
+	// Check cache first
+	if blk, ok := s.cache.get(height); ok {
+		return blk, nil
+	}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	var out *Block
@@ -114,6 +207,9 @@ func (s *Store) GetBlock(_ context.Context, height uint64) (*Block, error) {
 		}
 		return nil, err
 	}
+
+	// Cache the block for future reads
+	s.cache.put(out)
 	return out, nil
 }
 
@@ -157,6 +253,40 @@ func (s *Store) GetLatestBlock(_ context.Context) (*Block, error) {
 func (s *Store) SaveState(ctx context.Context, height uint64, stateRoot []byte) error {
 	key := append([]byte("state:"), encodeKey(height)...)
 	return s.db.Update(func(txn *badger.Txn) error { return txn.Set(key, stateRoot) })
+}
+
+// BatchSaveBlocks writes multiple blocks in parallel for fast sync
+func (s *Store) BatchSaveBlocks(ctx context.Context, blocks []*Block) error {
+	if len(blocks) == 0 {
+		return nil
+	}
+
+	// Use write batch for atomic multi-block writes
+	wb := s.db.NewWriteBatch()
+	defer wb.Cancel()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, blk := range blocks {
+		key := encodeKey(blk.Height)
+		enc, err := marshalBlock(blk)
+		if err != nil {
+			return err
+		}
+		if err := wb.Set(key, enc); err != nil {
+			return err
+		}
+		// Update cache eagerly
+		s.cache.put(blk)
+	}
+
+	if err := wb.Flush(); err != nil {
+		return err
+	}
+
+	s.blocks.Add(ctx, int64(len(blocks)), metric.WithAttributes(attribute.String("mode", "batch")))
+	return nil
 }
 
 // CalcSyncLag updates gauge with difference between local latest and network height.

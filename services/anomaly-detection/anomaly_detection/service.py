@@ -11,6 +11,14 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 
+# Import ONNX detector
+try:
+    from .onnx_detector import ONNXAnomalyDetector, StreamingAnomalyDetector
+    ONNX_AVAILABLE = True
+except ImportError:
+    ONNX_AVAILABLE = False
+    traceback.print_exc()
+
 SERVICE = "anomaly-detection"
 
 # Initialize metrics provider lazily

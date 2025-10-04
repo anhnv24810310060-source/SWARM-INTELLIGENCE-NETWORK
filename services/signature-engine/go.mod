@@ -3,6 +3,7 @@ module github.com/swarmguard/signature-engine
 go 1.22
 
 require (
+	github.com/hillu/go-yara/v4 v4.3.2
 	github.com/swarmguard/libs/go/core v0.0.0
 	go.opentelemetry.io/otel v1.28.0
 )
