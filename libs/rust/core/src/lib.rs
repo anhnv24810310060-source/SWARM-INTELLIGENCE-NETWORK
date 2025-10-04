@@ -16,7 +16,7 @@ use prometheus::{Encoder, TextEncoder};
 use std::net::SocketAddr;
 use serde::Deserialize;
 use opentelemetry::metrics::{Counter, Histogram, Meter, Unit};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering, AtomicU64};
 static OTEL_INIT: OnceCell<()> = OnceCell::new();
 static CONFIG_CACHE: OnceCell<RwLock<CachedConfig>> = OnceCell::new();
 static PROM_INIT: OnceCell<()> = OnceCell::new();
@@ -38,6 +38,9 @@ static NODE_READINESS: AtomicBool = AtomicBool::new(false);
 pub fn mark_ready() { NODE_READINESS.store(true, Ordering::SeqCst); }
 pub fn clear_ready() { NODE_READINESS.store(false, Ordering::SeqCst); }
 pub fn mark_not_live() { NODE_LIVENESS.store(false, Ordering::SeqCst); }
+/// Global detection metrics handle (initialized lazily).
+/// Exposed publicly for services to record detection events, while
+/// keeping construction encapsulated here to ensure consistent naming.
 pub static DETECTION_METRICS: Lazy<DetectionMetrics> = Lazy::new(|| {
     DetectionMetrics {
         signature_total: DETECTION_METER.u64_counter("swarm_detection_signature_total")
@@ -60,11 +63,22 @@ pub static DETECTION_METRICS: Lazy<DetectionMetrics> = Lazy::new(|| {
     }
 });
 
+// Internal atomic tallies to compute ratios quickly without depending on exporter introspection.
+static TOTAL_DETECTIONS: AtomicU64 = AtomicU64::new(0);
+static TOTAL_FALSE_POSITIVES: AtomicU64 = AtomicU64::new(0);
+
+/// Record a detection event (signature or anomaly) for internal ratio metrics.
+pub fn record_detection(is_false_positive: bool) {
+    TOTAL_DETECTIONS.fetch_add(1, Ordering::Relaxed);
+    if is_false_positive { TOTAL_FALSE_POSITIVES.fetch_add(1, Ordering::Relaxed); }
+}
+
 /// Helper to compute false positive ratio (uses u64 to avoid division by zero).
 pub fn false_positive_ratio() -> f64 {
-    // We can't read counter internal value directly (opaque); left as placeholder.
-    // Real implementation would maintain atomic tallies updated alongside counter increments.
-    0.0
+    let total = TOTAL_DETECTIONS.load(Ordering::Relaxed);
+    if total == 0 { return 0.0; }
+    let fp = TOTAL_FALSE_POSITIVES.load(Ordering::Relaxed);
+    fp as f64 / total as f64
 }
 
 #[derive(Debug, Clone)]
@@ -182,6 +196,14 @@ pub async fn load_config(service: &str) -> Result<DynamicConfig> {
     builder = builder.add_source(config::Environment::with_prefix("SWARM").separator("__"));
     let cfg = builder.build()?;
     let dyn_cfg: DynamicConfig = cfg.try_deserialize()?;
+    // If signature present, attempt verification (best-effort for now)
+    if let (Some(sig), Some(file)) = (&dyn_cfg.config_signature, &file_path) {
+        if let Ok(raw) = std::fs::read_to_string(file) {
+            if !crate::config_signature::verify_config_signature(&raw, sig) {
+                tracing::warn!(?file, "Config signature verification failed");
+            }
+        }
+    }
     let ttl_secs: u64 = std::env::var("SWARM_CONFIG_TTL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30);
     let cached = CachedConfig { cfg: dyn_cfg.clone(), fetched_at: Instant::now(), ttl: Duration::from_secs(ttl_secs), file: file_path};
     let lock = CONFIG_CACHE.get_or_init(|| RwLock::new(cached.clone()));
@@ -243,6 +265,8 @@ mod resilience; // new module providing retry & circuit breaker
 pub use resilience::{retry_async, RetryConfig, CircuitBreaker, BreakerState};
 pub mod resilience_telemetry; // telemetry metrics for resilience primitives
 pub use resilience_telemetry::{register_metrics as register_resilience_metrics, ResilienceMetrics};
+pub mod config_signature; // configuration signature verification (stub for now)
+pub use config_signature::verify_config_signature;
 
 // Advanced swarm intelligence modules
 pub mod ml_detection;
