@@ -12,6 +12,7 @@ members = [
     "services/node-runtime",
     "services/sensor-gateway",
     "services/swarm-gossip",
+    "services/detection-service",
 ]
 resolver = "2"
 

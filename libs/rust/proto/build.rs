@@ -1,5 +1,6 @@
 fn main() {
-    let proto_dir = "../../proto"; // relative from crate dir
+    // crate path: root/libs/rust/proto -> proto dir: root/proto => ../../../proto
+    let proto_dir = "../../../proto"; // relative from crate dir
     let mut protos = Vec::new();
     for entry in walkdir::WalkDir::new(proto_dir) {
         let e = entry.unwrap();
@@ -16,7 +17,8 @@ fn main() {
     let hash = format!("{:x}", hasher.finalize());
     println!("cargo:rustc-env=PROTO_SCHEMA_VERSION={}", &hash);
     // Build server stubs only for consensus (pbft)
-    let mut config = tonic_build::configure();
-    config.build_server(true);
-    config.compile(&protos, &[proto_dir]).expect("failed to compile protos");
+    tonic_build::configure()
+        .build_server(true)
+        .compile(&protos, &[proto_dir])
+        .expect("failed to compile protos");
 }

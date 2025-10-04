@@ -1,0 +1,25 @@
+[project]
+name = "swarm-anomaly-detection"
+version = "0.0.1"
+description = "Swarm anomaly detection inference service"
+authors = [{name="SwarmGuard"}]
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi",
+  "uvicorn[standard]",
+  "pydantic~=2.7",
+  "numpy",
+  "scikit-learn",
+  "torch>=2.0.0",
+  "onnxruntime>=1.15.0",
+  "joblib",
+  "opentelemetry-sdk",
+  "opentelemetry-api",
+  "opentelemetry-exporter-otlp",
+]
+
+[project.optional-dependencies]
+train = ["pandas", "pyyaml"]
+
+'tool.setuptools.packages.find']
+where = ["anomaly_detection"]

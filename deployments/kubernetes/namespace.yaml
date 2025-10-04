@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: swarm-system
+  labels:
+    name: swarm-system
+    environment: production
+    managed-by: kubectl
+    istio-injection: enabled  # Enable service mesh
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: swarm-quota
+  namespace: swarm-system
+spec:
+  hard:
+    requests.cpu: "50"
+    requests.memory: 100Gi
+    requests.storage: 500Gi
+    persistentvolumeclaims: "20"
+    services.loadbalancers: "3"
+    services.nodeports: "0"  # Prefer LoadBalancer
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: swarm-limits
+  namespace: swarm-system
+spec:
+  limits:
+  - max:
+      cpu: "4"
+      memory: 8Gi
+    min:
+      cpu: 50m
+      memory: 64Mi
+    default:
+      cpu: 500m
+      memory: 512Mi
+    defaultRequest:
+      cpu: 100m
+      memory: 128Mi
+    type: Container
+  - max:
+      cpu: "8"
+      memory: 16Gi
+    type: Pod

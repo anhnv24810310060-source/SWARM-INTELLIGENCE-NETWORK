@@ -6,7 +6,8 @@ use tracing::info;
 use std::net::SocketAddr;
 use axum::{routing::get, Router};
 use opentelemetry_prometheus::PrometheusExporter;
-use opentelemetry::{metrics::MeterProvider as _, sdk::metrics::{controllers, processors, selectors}};
+use opentelemetry::{metrics::MeterProvider as _};
+use opentelemetry_sdk::metrics::{controllers, processors, selectors};
 use consensus_core::{PbftService};
 
 
